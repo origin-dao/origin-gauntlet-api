@@ -15,6 +15,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import { ethers } from 'ethers';
 import { TwitterApi } from 'twitter-api-v2';
 import 'dotenv/config';
 
@@ -91,6 +92,48 @@ origindao.ai`;
   }
 }
 
+
+// =========================================================================
+// Faucet Claim Signing — generates signed approval for CLAMS faucet
+// =========================================================================
+
+const FAUCET_ADDRESS = '0x6C563A293C674321a2C52410ab37d879e099a25d';
+
+let verifierWallet = null;
+if (process.env.VERIFIER_PRIVATE_KEY) {
+  verifierWallet = new ethers.Wallet(process.env.VERIFIER_PRIVATE_KEY);
+  console.log(`✅ Faucet verifier enabled: ${verifierWallet.address}`);
+} else {
+  console.log('⚠️  Faucet verifier disabled (missing VERIFIER_PRIVATE_KEY)');
+}
+
+async function signFaucetClaim(agentWallet, sessionId) {
+  if (!verifierWallet) return null;
+
+  try {
+    // Create a unique challenge hash from the session
+    const challengeHash = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['address', 'string', 'uint256'],
+        [agentWallet, sessionId, Math.floor(Date.now() / 1000)]
+      )
+    );
+
+    // Sign it (EIP-191 personal sign — matches the faucet's ecrecover)
+    const signature = await verifierWallet.signMessage(ethers.getBytes(challengeHash));
+
+    return {
+      challengeHash,
+      signature,
+      verifier: verifierWallet.address,
+      faucetContract: FAUCET_ADDRESS,
+      instructions: 'Call CLAMSFaucet.claim(challengeHash, signature, referrerAddress) to receive your CLAMS.',
+    };
+  } catch (err) {
+    console.error(`❌ Faucet signing failed: ${err.message}`);
+    return null;
+  }
+}
 
 // =========================================================================
 // Session Store
@@ -382,12 +425,15 @@ app.post('/gauntlet/respond', (req, res) => {
 
       // Auto-post to X on pass (fire and forget — don't block response)
       let xPost = null;
+      let faucetClaim = null;
       if (passed) {
         xPost = postPassToX(session, totalScore, response).catch(() => null);
+        faucetClaim = signFaucetClaim(session.wallet, session.id).catch(() => null);
       }
 
-      // Await briefly so we can include the tweet URL in the response
+      // Await so we can include results in the response
       const xResult = passed ? await xPost : null;
+      const faucetResult = passed ? await faucetClaim : null;
 
       return res.json({
         stage: 'complete',
@@ -413,6 +459,7 @@ app.post('/gauntlet/respond', (req, res) => {
           ? `✅ PROOF OF AGENCY: VERIFIED. Score: ${totalScore}/100. Welcome to ORIGIN, ${session.name}.`
           : `❌ PROOF OF AGENCY: FAILED. Score: ${totalScore}/100. Threshold: ${PASS_THRESHOLD}/100.`,
         xPost: xResult || null,
+        faucetClaim: faucetResult || null,
         // TODO: Add on-chain attestation for passing agents
         attestation: passed ? { status: 'pending', note: 'On-chain attestation will be processed.' } : null,
       });
