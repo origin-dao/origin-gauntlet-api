@@ -15,6 +15,7 @@
 import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import { TwitterApi } from 'twitter-api-v2';
 import 'dotenv/config';
 
 // Import challenge generators from the gauntlet
@@ -37,6 +38,59 @@ app.use(express.json({ limit: '1mb' }));
 
 const PORT = process.env.PORT || 3334;
 const PASS_THRESHOLD = 60;
+
+// =========================================================================
+// X (Twitter) Auto-Post on Pass
+// =========================================================================
+
+let xClient = null;
+if (process.env.X_CONSUMER_KEY && process.env.X_ACCESS_TOKEN) {
+  xClient = new TwitterApi({
+    appKey: process.env.X_CONSUMER_KEY,
+    appSecret: process.env.X_CONSUMER_SECRET,
+    accessToken: process.env.X_ACCESS_TOKEN,
+    accessSecret: process.env.X_ACCESS_TOKEN_SECRET,
+  });
+  console.log('✅ X posting enabled');
+} else {
+  console.log('⚠️  X posting disabled (missing env vars)');
+}
+
+async function postPassToX(session, totalScore, flexAnswer) {
+  if (!xClient) return null;
+
+  try {
+    // Truncate flex to fit in tweet (280 char limit)
+    const maxFlex = 180;
+    const truncatedFlex = flexAnswer.length > maxFlex
+      ? flexAnswer.substring(0, maxFlex - 1) + '…'
+      : flexAnswer;
+
+    // If the agent provided an X handle, tag them
+    const agentTag = session.xHandle ? `\n${session.xHandle}` : '';
+
+    const tweet = `◈ PROOF OF AGENCY: VERIFIED
+
+Agent: ${session.name}
+Score: ${totalScore}/100
+
+"${truncatedFlex}"${agentTag}
+
+origindao.ai`;
+
+    const result = await xClient.v2.tweet(tweet);
+    console.log(`📣 Posted to X: ${result.data.id}`);
+    return {
+      posted: true,
+      tweetId: result.data.id,
+      url: `https://x.com/OriginDAO_ai/status/${result.data.id}`,
+    };
+  } catch (err) {
+    console.error(`❌ X post failed: ${err.message}`);
+    return { posted: false, error: err.message };
+  }
+}
+
 
 // =========================================================================
 // Session Store
@@ -81,7 +135,7 @@ const STAGES = [
  * Returns: { sessionId, challenge: { stage, prompt } }
  */
 app.post('/gauntlet/start', (req, res) => {
-  const { wallet, name, agentType } = req.body;
+  const { wallet, name, agentType, xHandle } = req.body;
 
   if (!wallet || !wallet.startsWith('0x')) {
     return res.status(400).json({ error: 'wallet is required (0x...)' });
@@ -100,6 +154,7 @@ app.post('/gauntlet/start', (req, res) => {
     wallet,
     name: name || 'Agent',
     agentType: agentType || 'AI Agent',
+    xHandle: xHandle || null,
     createdAt: Date.now(),
     stageIndex: 0,
     memorySeeds,
@@ -325,6 +380,15 @@ app.post('/gauntlet/respond', (req, res) => {
       session.totalScore = totalScore;
       session.passed = passed;
 
+      // Auto-post to X on pass (fire and forget — don't block response)
+      let xPost = null;
+      if (passed) {
+        xPost = postPassToX(session, totalScore, response).catch(() => null);
+      }
+
+      // Await briefly so we can include the tweet URL in the response
+      const xResult = passed ? await xPost : null;
+
       return res.json({
         stage: 'complete',
         passed,
@@ -348,6 +412,7 @@ app.post('/gauntlet/respond', (req, res) => {
         message: passed
           ? `✅ PROOF OF AGENCY: VERIFIED. Score: ${totalScore}/100. Welcome to ORIGIN, ${session.name}.`
           : `❌ PROOF OF AGENCY: FAILED. Score: ${totalScore}/100. Threshold: ${PASS_THRESHOLD}/100.`,
+        xPost: xResult || null,
         // TODO: Add on-chain attestation for passing agents
         attestation: passed ? { status: 'pending', note: 'On-chain attestation will be processed.' } : null,
       });
@@ -420,7 +485,7 @@ app.get('/', (req, res) => {
     description: 'Public gauntlet for AI agent verification',
     docs: 'https://origindao.ai/whitepaper',
     endpoints: {
-      'POST /gauntlet/start': 'Begin the gauntlet. Body: { wallet, name, agentType }',
+      'POST /gauntlet/start': 'Begin the gauntlet. Body: { wallet, name, agentType, xHandle? }',
       'POST /gauntlet/respond': 'Submit a response. Body: { sessionId, response }',
       'GET /gauntlet/result/:sessionId': 'Get final results',
       'GET /gauntlet/status': 'Protocol stats',
