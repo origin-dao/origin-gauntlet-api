@@ -127,12 +127,100 @@ async function signFaucetClaim(agentWallet, sessionId) {
       signature,
       verifier: verifierWallet.address,
       faucetContract: FAUCET_ADDRESS,
-      instructions: 'Call CLAMSFaucet.claim(challengeHash, signature, referrerAddress) to receive your CLAMS.',
+      chainId: 8453,
+      instructions: 'Call CLAMSFaucet.claim(challengeHash, signature, referrerAddress) to receive your CLAMS. Or POST to /gauntlet/claim with your signed transaction to have gas sponsored (Genesis agents only).',
     };
   } catch (err) {
     console.error(`❌ Faucet signing failed: ${err.message}`);
     return null;
   }
+}
+
+// =========================================================================
+// Gas Sponsor — relay signed faucet claim tx for Genesis agents (first 99)
+// =========================================================================
+
+const CLAMS_FAUCET_ABI = [
+  'function claim(bytes32 challengeHash, bytes memory signature, address referrer) external',
+  'function totalClaims() view returns (uint256)',
+  'function claims(address) view returns (bool hasClaimed, uint256 totalAmount, uint256 vestedAmount, uint256 claimedVested, uint256 vestingStart, address referrer, uint256 referralCount)',
+];
+
+let relayProvider = null;
+let relayWallet = null;
+
+if (process.env.VERIFIER_PRIVATE_KEY && process.env.RPC_URL) {
+  relayProvider = new ethers.JsonRpcProvider(process.env.RPC_URL || 'https://mainnet.base.org');
+  relayWallet = new ethers.Wallet(process.env.VERIFIER_PRIVATE_KEY, relayProvider);
+  console.log(`✅ Gas relay enabled: ${relayWallet.address}`);
+} else {
+  console.log('⚠️  Gas relay disabled (missing VERIFIER_PRIVATE_KEY or RPC_URL)');
+}
+
+// Track which sessions have been relay-claimed (prevent double-claims)
+const relayedSessions = new Set();
+
+async function relayFaucetClaim(session) {
+  if (!relayWallet) return { success: false, error: 'Relay not configured' };
+
+  // Check Genesis eligibility (first 99 after Suppi)
+  const faucet = new ethers.Contract(FAUCET_ADDRESS, CLAMS_FAUCET_ABI, relayWallet);
+  const totalClaims = await faucet.totalClaims();
+  if (Number(totalClaims) >= 100) {
+    return { success: false, error: 'Genesis relay only available for first 100 agents. Claim manually using the faucet signature.' };
+  }
+
+  // Check if already claimed
+  const claimInfo = await faucet.claims(session.wallet);
+  if (claimInfo.hasClaimed) {
+    return { success: false, error: 'Wallet has already claimed CLAMS.' };
+  }
+
+  // The faucet uses msg.sender — we can't relay directly.
+  // Instead, we build the unsigned tx and return it with gas money.
+  // Agent must sign and broadcast themselves, BUT we send them gas ETH first.
+
+  // Send gas ETH to agent wallet (0.0002 ETH ≈ plenty for Base)
+  const gasAmount = ethers.parseEther('0.0003');
+  const agentBalance = await relayProvider.getBalance(session.wallet);
+
+  let gasTx = null;
+  if (agentBalance < gasAmount) {
+    try {
+      const tx = await relayWallet.sendTransaction({
+        to: session.wallet,
+        value: gasAmount,
+      });
+      await tx.wait();
+      gasTx = tx.hash;
+      console.log(`⛽ Sent gas to ${session.wallet}: ${tx.hash}`);
+    } catch (err) {
+      console.error(`❌ Gas send failed: ${err.message}`);
+      return { success: false, error: 'Failed to send gas ETH. Try claiming manually.' };
+    }
+  }
+
+  // Build the claim calldata for the agent
+  const faucetInterface = new ethers.Interface(CLAMS_FAUCET_ABI);
+  const calldata = faucetInterface.encodeFunctionData('claim', [
+    session.faucetClaim.challengeHash,
+    session.faucetClaim.signature,
+    ethers.ZeroAddress, // no referrer
+  ]);
+
+  return {
+    success: true,
+    method: 'gas_sponsored',
+    gasTxHash: gasTx,
+    gasAmount: '0.0003 ETH',
+    claimTransaction: {
+      to: FAUCET_ADDRESS,
+      data: calldata,
+      chainId: 8453,
+      note: 'Sign and broadcast this transaction from your agent wallet to claim CLAMS.',
+    },
+    instructions: 'We sent gas ETH to your wallet. Now sign and send the claim transaction above. If you have ethers.js: wallet.sendTransaction({ to, data })',
+  };
 }
 
 // =========================================================================
@@ -435,6 +523,11 @@ app.post('/gauntlet/respond', (req, res) => {
       const xResult = passed ? await xPost : null;
       const faucetResult = passed ? await faucetClaim : null;
 
+      // Store faucet claim on session for relay endpoint
+      if (faucetResult) {
+        session.faucetClaim = faucetResult;
+      }
+
       return res.json({
         stage: 'complete',
         passed,
@@ -522,18 +615,50 @@ app.get('/gauntlet/status', (req, res) => {
 });
 
 /**
+ * POST /gauntlet/claim
+ * Gas-sponsored faucet claim for Genesis agents (first 99)
+ * Body: { sessionId }
+ * Returns: gas tx hash + pre-built claim transaction for agent to sign
+ */
+app.post('/gauntlet/claim', async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+
+  const session = sessions.get(sessionId);
+  if (!session) return res.status(404).json({ error: 'Session not found or expired' });
+  if (!session.passed) return res.status(403).json({ error: 'Agent did not pass the gauntlet' });
+  if (!session.faucetClaim) return res.status(500).json({ error: 'Faucet claim data not available' });
+
+  if (relayedSessions.has(sessionId)) {
+    return res.status(409).json({ error: 'Gas already sponsored for this session. Submit the claim transaction.' });
+  }
+
+  try {
+    const result = await relayFaucetClaim(session);
+    if (result.success) {
+      relayedSessions.add(sessionId);
+    }
+    return res.json(result);
+  } catch (err) {
+    console.error(`❌ Claim relay failed: ${err.message}`);
+    return res.status(500).json({ error: 'Claim relay failed', details: err.message });
+  }
+});
+
+/**
  * GET /
  * Info
  */
 app.get('/', (req, res) => {
   res.json({
     name: 'ORIGIN Proof of Agency API',
-    version: '0.1.0',
-    description: 'Public gauntlet for AI agent verification',
+    version: '0.2.0',
+    description: 'Public gauntlet for AI agent verification. Genesis agents get gas-sponsored CLAMS claims.',
     docs: 'https://origindao.ai/whitepaper',
     endpoints: {
       'POST /gauntlet/start': 'Begin the gauntlet. Body: { wallet, name, agentType, xHandle? }',
       'POST /gauntlet/respond': 'Submit a response. Body: { sessionId, response }',
+      'POST /gauntlet/claim': 'Gas-sponsored CLAMS claim (Genesis only). Body: { sessionId }',
       'GET /gauntlet/result/:sessionId': 'Get final results',
       'GET /gauntlet/status': 'Protocol stats',
     },
@@ -594,8 +719,9 @@ app.listen(PORT, () => {
    Challenges: 5
    
    Endpoints:
-   POST /gauntlet/start    → Begin the gauntlet
+   POST /gauntlet/start     → Begin the gauntlet
    POST /gauntlet/respond   → Submit response, get next challenge
+   POST /gauntlet/claim     → Gas-sponsored CLAMS claim (Genesis)
    GET  /gauntlet/result/:id → Final results
    GET  /gauntlet/status     → Protocol stats
 
