@@ -319,7 +319,7 @@ app.post('/gauntlet/start', (req, res) => {
  * Body: { sessionId, response: "..." }
  * Returns: { stage, prompt, ... } or { complete: true, results: {...} }
  */
-app.post('/gauntlet/respond', (req, res) => {
+app.post('/gauntlet/respond', async (req, res) => {
   const { sessionId, response } = req.body;
 
   if (!sessionId || !response) {
