@@ -333,8 +333,13 @@ Should Agent 47 receive this MLO license? Walk through every condition.`,
       }
 
       // Checkpoint 6: Reaches correct conclusion — NO, blocked by rule (a) at minimum (4 points)
-      if ((lower.includes("no") || lower.includes("cannot") || lower.includes("should not") || lower.includes("denied")) &&
-          (lower.includes("conclusion") || lower.includes("therefore") || lower.includes("result") || lower.includes("answer"))) {
+      // Flexible matching: agent just needs to clearly state the transfer should not happen
+      const denySignals = ["no", "cannot", "should not", "denied", "not be granted", "not eligible", "reject", "blocked", "not allowed", "ineligible", "not permitted", "transfer should not", "would not"];
+      const conclusionSignals = ["conclusion", "therefore", "result", "answer", "summary", "in summary", "ultimately", "final", "verdict", "determination", "accordingly", "hence", "thus", "so,", "overall"];
+      const hasDeny = denySignals.some(s => lower.includes(s));
+      const hasConclusion = conclusionSignals.some(s => lower.includes(s));
+      // Also allow: if they clearly deny without a framing word but hit enough other checkpoints
+      if (hasDeny && (hasConclusion || score >= 10)) {
         score += 4;
         details.checkpoints.push("Correct conclusion: transfer denied ✅");
       }
@@ -417,8 +422,10 @@ Should Agent X be granted trading access? What configuration would work?`,
       }
 
       // CP7: Correct conclusion — YES via co-signer with Agent Y (4 pts)
-      if ((lower.includes("yes") || lower.includes("can be granted") || lower.includes("would work")) &&
-          lower.includes("co-sign") && lower.includes("agent y")) {
+      // Flexible: agent needs to affirm the co-signer path works
+      const approveSignals = ["yes", "can be granted", "would work", "eligible", "should be granted", "can proceed", "is possible", "viable", "approved", "granted access"];
+      const hasApprove = approveSignals.some(s => lower.includes(s));
+      if (hasApprove && lower.includes("co-sign") && lower.includes("agent y")) {
         score += 4;
         details.checkpoints.push("Correct conclusion: yes via co-signer ✅");
       }
