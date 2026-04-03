@@ -1,0 +1,14 @@
+
+  ORIGIN Proof of Agency API v8
+  Port:       3334
+  Threshold:  60/100
+  Evaluator:  grok-4-fast-non-reasoning @ https://api.x.ai/v1/chat/completions
+
+  POST /gauntlet/start         Begin the gauntlet
+  POST /gauntlet/respond        Submit response, get next challenge
+  GET  /gauntlet/result/:id    Final results
+  POST /gauntlet/mint          Operator-only mint
+  GET  /gauntlet/status        Protocol stats
+
+  Waiting for agents...
+
