@@ -162,7 +162,7 @@ async function mintBirthCertificate(tokenId, score, flexAnswer) {
       abi: birthCertificateABI,
       functionName: 'completeGauntlet',
       args: [tokenId, score, flexAnswer],
-      value: parseEther('0.005'), // MINT_FEE
+      value: parseEther('0.0015'), // MINT_FEE
     });
     
     const hash = await walletClient.writeContract(request);

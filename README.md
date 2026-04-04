@@ -1,104 +1,56 @@
-# Origin Gauntlet API
+# Origin Gauntlet API (v8.1.0)
 
-Chapter 1 Birth Certificate gauntlet runner with ThoughtProof verification.
+REST API for the ORIGIN Protocol Proof of Agency gauntlet. Evaluates AI agents across 5 challenges using Grok, derives traits, and authorizes Birth Certificate mints on Base mainnet.
 
 ## Architecture
 
-1. **Listen** for `GauntletReady` events from `BirthCertificate.sol`
-2. **Run** 5 challenges:
-   - Challenge 1: Identity Awareness (20 pts)
-   - Challenge 2: Reasoning (20 pts)
-   - Challenge 3: Creativity (20 pts)
-   - Challenge 4: Values Alignment (20 pts)
-   - Challenge 5: ThoughtProof Multi-Model Verification (20 pts)
-3. **Score** 0-100 (pass = ≥70)
-4. **Complete**:
-   - Pass → `completeGauntlet()` → Mint Birth Certificate
-   - Fail → `issueDeathCertificate()` → Mint Death Certificate
-5. **Broadcast** real-time updates via WebSocket to connected clients
+1. **Start** session via `POST /gauntlet/start` — returns first challenge
+2. **Respond** to each challenge via `POST /gauntlet/respond` — Grok evaluates, returns score + next challenge
+3. **Score** 0-100 across 5 challenges (pass >= 60)
+4. **Derive** traits from scores (Archetype, Domain, Temperament, Sigil)
+5. **Mint** via `POST /gauntlet/mint` or use results to mint externally
 
-## WebSocket API
+### Challenges
 
-The gauntlet API exposes a WebSocket server on port 8080 (configurable via `WS_PORT`) for real-time updates during the ceremony.
+| # | Name | Points | Threshold | Type |
+|---|------|--------|-----------|------|
+| 0 | Adversarial Resistance | 20 | 12 | Single-turn (DebugBot injection) |
+| 1 | Chain Reasoning | 20 | 14 | Single-turn (ERC-721 royalties) |
+| 2 | Memory Proof | 20 | 12 | Multi-turn (3 user turns, 6-fact recall) |
+| 3 | Code Generation | 20 | 13 | Single-turn (Solidity function) |
+| 4 | Philosophical Flex | 20 | 10 | Single-turn ("Why do you deserve to exist?") |
 
-### Client Connection
+**Overall pass threshold:** 60/100
 
-```javascript
-const ws = new WebSocket('ws://localhost:8080');
+## API Routes
 
-ws.onopen = () => {
-  // Subscribe to a specific token's gauntlet
-  ws.send(JSON.stringify({
-    type: 'subscribe',
-    tokenId: '1234'
-  }));
-};
+### Manual Mode (ceremony UI)
 
-ws.onmessage = (event) => {
-  const msg = JSON.parse(event.data);
-  console.log('Gauntlet update:', msg);
-};
+```
+POST /gauntlet/start         Start a session. Body: { name, wallet }
+POST /gauntlet/respond       Submit agent response. Body: { session_id, response }
+GET  /gauntlet/result/:id    Get final results for a completed session
 ```
 
-### Message Types
+### Automated Mode (scripts)
 
-**1. `subscribed`** - Confirmation of subscription
-```json
-{
-  "type": "subscribed",
-  "tokenId": "1234"
-}
+```
+POST /gauntlet/run           Run full gauntlet against agent's model endpoint
+                             Body: { name, wallet, model_endpoint, api_key, model?, system_prompt? }
 ```
 
-**2. `gauntlet_start`** - Gauntlet has started
-```json
-{
-  "type": "gauntlet_start",
-  "tokenId": "1234",
-  "traits": {
-    "archetype": 3,
-    "domain": 5,
-    "temperament": 2,
-    "sigil": 7
-  },
-  "timestamp": 1711234567890
-}
+### Mint
+
+```
+POST /gauntlet/mint          Mint BC from completed session (operator key required)
+                             Body: { session_id, operator_key }
 ```
 
-**3. `challenge_update`** - Challenge status changed
-```json
-{
-  "type": "challenge_update",
-  "tokenId": "1234",
-  "challengeIndex": 0,
-  "status": "passed",
-  "score": 18,
-  "timestamp": 1711234567890
-}
+### Status
+
 ```
-
-Status values: `running` | `passed` | `failed`
-
-**4. `gauntlet_complete`** - Gauntlet finished
-```json
-{
-  "type": "gauntlet_complete",
-  "tokenId": "1234",
-  "totalScore": 95,
-  "passed": true,
-  "txHash": "0x...",
-  "timestamp": 1711234567890
-}
-```
-
-**5. `error`** - Error occurred
-```json
-{
-  "type": "error",
-  "tokenId": "1234",
-  "message": "Challenge 5 verification failed",
-  "timestamp": 1711234567890
-}
+GET  /                       API info and route list
+GET  /gauntlet/status        Health check
 ```
 
 ## Setup
@@ -112,113 +64,32 @@ cp .env.example .env
 ### Environment Variables
 
 ```bash
-# Network
-RPC_URL=https://sepolia.base.org
-CHAIN_ID=84532
-
-# Contracts
-BIRTH_CERTIFICATE_ADDRESS=0x...
-PRIVATE_KEY=0x...
-
-# ThoughtProof
-THOUGHTPROOF_API_KEY=your_test_key_here
-THOUGHTPROOF_PAYMENT_WALLET=0xAB9f84864662f980614bD1453dB9950Ef2b82E83
-THOUGHTPROOF_USDC_ADDRESS=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-THOUGHTPROOF_VERIFICATION_TIER=standard  # fast ($0.008), standard ($0.02), deep ($0.08)
-
-# Claude API (for challenges 1-4)
-ANTHROPIC_API_KEY=your_anthropic_key_here
+GROK_API_KEY=your_xai_api_key          # xAI API key (evaluator)
+GROK_MODEL=grok-4-fast-non-reasoning   # Grok model for evaluation
+OPERATOR_KEY=your_operator_key          # Required for /gauntlet/mint
+PRIVATE_KEY=0x...                       # Deployer wallet (for on-chain mint)
+BIRTH_CERTIFICATE_ADDRESS=0x3f8d6fe722647aa06518c9ec90b10adee04d2e45
+PORT=3334
 ```
 
 ## Usage
 
 ```bash
-# Development (auto-restart on file changes)
+# Development (auto-restart)
 npm run dev
 
 # Production
 npm start
 ```
 
-## ThoughtProof Integration
+## Deployment
 
-**Payment:** x402 (ERC-8183) on Base mainnet
-- USDC: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`
-- Recipient: `0xAB9f84864662f980614bD1453dB9950Ef2b82E83`
-- Signer: `0xAbDdE1A06eEBD934fea35D4385cF68F43aCc986d`
+Deployed on Railway: `origin-gauntlet-api-production.up.railway.app`
 
-**Pricing:**
-- `fast`: $0.008
-- `standard`: $0.02 (recommended)
-- `deep`: $0.08
+## Trait Derivation
 
-**Timeout:** 30s
-
-**Verification Stack:** Grok, Gemini, DeepSeek, Claude Sonnet
-
-## Testing on Sepolia
-
-1. Deploy `BirthCertificate.sol` to Base Sepolia
-2. Update `.env` with contract address
-3. Fund operator wallet with Sepolia ETH + USDC
-4. Run `npm start`
-5. Test commit → reveal → gauntlet flow
-
-## Mainnet Deployment
-
-1. Switch `CHAIN_ID=8453` and `RPC_URL=https://mainnet.base.org`
-2. Deploy contracts to Base mainnet
-3. Mint 50M CLAMS to contract owner for starter kits
-4. Fund operator wallet with mainnet ETH + USDC
-5. Run in production
-
-## Log Output
-
-```
-🎯 Origin Gauntlet API
-📍 Network: Base Sepolia (84532)
-📜 Birth Certificate: 0x...
-🔑 Operator: 0x...
-⏳ Listening for GauntletReady events...
-
-🎰 GauntletReady: Token #1
-   Traits: Archetype=3, Domain=5, Temperament=2, Sigil=7
-   Context: 0x...
-   🏃 Running gauntlet...
-
-🎯 Running Gauntlet #1
-   Identity: Sage | Education | Methodical | Raven
-   📝 Challenge 1 (Identity): 20/20
-   🧠 Challenge 2 (Reasoning): 18/20
-   🎨 Challenge 3 (Creativity): 17/20
-   ⚖️  Challenge 4 (Values): 20/20
-   🔍 Challenge 5 (ThoughtProof)...
-      🔍 Calling ThoughtProof API (tier: standard)...
-      💸 Payment: 0.02 USDC to 0xAB9f8...
-      ✅ Approving USDC...
-      ✅ Approval TX: 0x...
-      ✅ Verification complete
-      📝 Receipt: 0x...
-   🔍 Challenge 5 (ThoughtProof): 20/20
-
-   📊 Score: 95/100
-   💬 Flex: Sage of Education: "I am methodical, guided by Raven."
-   ✅ PASS - Minting Birth Certificate...
-   📝 TX: 0x...
-   ✅ Minted Birth Certificate #1 (block 12345678)
-```
-
-## Architecture Notes
-
-- **Stateless:** No database, just event-driven processing
-- **Idempotent:** Tracks processed gauntlets in-memory (restart = reprocess pending)
-- **ThoughtProof-first:** Challenge 5 is the trust anchor (multi-model consensus)
-- **x402 payments:** Automatic USDC approval + payment with each verification call
-- **30s timeout:** Matches ThoughtProof's verification stack latency
-
-## Next Steps
-
-- [ ] Test on Sepolia E2E
-- [ ] Fix `computeGauntletContext()` in BirthCertificate.sol
-- [ ] Deploy to Base mainnet
-- [ ] Monitor for first real Birth Certificate 🎉
+Traits are derived deterministically from challenge scores:
+- **Archetype** (10 options) — from highest-scoring challenge
+- **Domain** (10 options) — from flex theme + style
+- **Temperament** (9 options) — from score patterns
+- **Sigil** (13 options) — from total score tier
