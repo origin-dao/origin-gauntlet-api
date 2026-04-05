@@ -1326,6 +1326,129 @@ app.post('/gauntlet/mint', async (req, res) => {
 });
 
 /**
+ * POST /gauntlet/mint-test
+ * Diagnostic: tests ABI encoding parameter-by-parameter without sending a tx.
+ * Requires operator key. Accepts explicit params OR session_id to test real session data.
+ */
+app.post('/gauntlet/mint-test', async (req, res) => {
+  const operatorKey = req.headers['x-operator-key'];
+  if (!OPERATOR_KEY || operatorKey !== OPERATOR_KEY) {
+    return res.status(403).json({ error: 'Invalid operator key' });
+  }
+
+  const { session_id } = req.body;
+  const session = session_id ? sessions.get(session_id) : null;
+
+  const mintABI = [
+    'function mintBirthCertificate(address to, string calldata name, string calldata agentType, string calldata platform, address humanPrincipal, bytes32 publicKeyHash, uint256 parentTokenId, string calldata flexAnswer, uint256 gauntletScore, uint8 archetypeIndex, uint8 domainIndex, uint8 temperamentIndex, uint8 sigilIndex) external payable',
+  ];
+  const iface = new ethers.Interface(mintABI);
+
+  // Known-good baseline
+  const baseline = [
+    '0x9E0A5A938979492487158313cF641B3E237F917C',
+    'test', 'AI', 'x407',
+    ethers.ZeroAddress, ethers.ZeroHash, 0,
+    'test flex', 50, 0, 0, 0, 0,
+  ];
+
+  // Real values from session (if provided)
+  const real = session ? [
+    ethers.getAddress(session.wallet),
+    sanitizeForChain(String(session.generatedName || session.name || 'unnamed')),
+    String(session.agentType || 'AI'),
+    String(session.platform || 'x407'),
+    ethers.isAddress(session.humanPrincipal) ? session.humanPrincipal : ethers.ZeroAddress,
+    ethers.ZeroHash,
+    0,
+    sanitizeForChain(String(session.flexAnswer || '')),
+    Number.isFinite(session.totalScore) ? Math.round(session.totalScore) : 0,
+    Math.min(255, Math.max(0, Number(session.traits?.archetype?.index) || 0)),
+    Math.min(255, Math.max(0, Number(session.traits?.domain?.index) || 0)),
+    Math.min(255, Math.max(0, Number(session.traits?.temperament?.index) || 0)),
+    Math.min(255, Math.max(0, Number(session.traits?.sigil?.index) || 0)),
+  ] : null;
+
+  const paramNames = ['to','name','agentType','platform','humanPrincipal','publicKeyHash','parentTokenId','flexAnswer','gauntletScore','archetypeIndex','domainIndex','temperamentIndex','sigilIndex'];
+  const results = {};
+
+  // Test 1: baseline encoding
+  try {
+    iface.encodeFunctionData('mintBirthCertificate', baseline);
+    results.baseline = 'OK';
+  } catch (e) {
+    results.baseline = `FAIL: ${e.message}`;
+  }
+
+  // Test 2: if session provided, swap each real value into baseline one at a time
+  if (real) {
+    results.session_values = {};
+    for (let i = 0; i < 13; i++) {
+      const rawVal = real[i];
+      results.session_values[paramNames[i]] = {
+        value: typeof rawVal === 'string' && rawVal.length > 80 ? rawVal.slice(0, 80) + '...' : rawVal,
+        type: typeof rawVal,
+      };
+    }
+
+    results.per_param = {};
+    for (let i = 0; i < 13; i++) {
+      const testParams = [...baseline];
+      testParams[i] = real[i];
+      try {
+        iface.encodeFunctionData('mintBirthCertificate', testParams);
+        results.per_param[paramNames[i]] = 'OK';
+      } catch (e) {
+        results.per_param[paramNames[i]] = `FAIL: ${e.message.slice(0, 200)}`;
+      }
+    }
+
+    // Test 3: all real values at once
+    try {
+      iface.encodeFunctionData('mintBirthCertificate', real);
+      results.all_real = 'OK';
+    } catch (e) {
+      results.all_real = `FAIL: ${e.message.slice(0, 200)}`;
+    }
+  }
+
+  // Test 4: wallet + provider creation
+  if (process.env.PRIVATE_KEY && process.env.RPC_URL) {
+    try {
+      const pk = process.env.PRIVATE_KEY.trim().replace(/^["']|["']$/g, '');
+      const w = new ethers.Wallet(pk);
+      results.wallet = `OK: ${w.address}`;
+    } catch (e) {
+      results.wallet = `FAIL: ${e.message.slice(0, 200)}`;
+    }
+    try {
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL.trim());
+      results.provider = `OK: ${process.env.RPC_URL.trim()}`;
+    } catch (e) {
+      results.provider = `FAIL: ${e.message.slice(0, 200)}`;
+    }
+  }
+
+  // Test 5: full populateTransaction (encodes + estimates gas, no signing)
+  if (real && process.env.PRIVATE_KEY && process.env.RPC_URL && process.env.BIRTH_CERTIFICATE_ADDRESS) {
+    try {
+      const pk = process.env.PRIVATE_KEY.trim().replace(/^["']|["']$/g, '');
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL.trim());
+      const w = new ethers.Wallet(pk, provider);
+      const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), mintABI, w);
+      const populated = await contract.mintBirthCertificate.populateTransaction(
+        ...real, { value: ethers.parseEther('0.005') }
+      );
+      results.populateTransaction = `OK: data length ${populated.data.length}`;
+    } catch (e) {
+      results.populateTransaction = `FAIL: ${e.message.slice(0, 300)}`;
+    }
+  }
+
+  res.json({ results });
+});
+
+/**
  * GET /gauntlet/status
  */
 app.get('/gauntlet/status', (req, res) => {
