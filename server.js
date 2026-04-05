@@ -1133,14 +1133,17 @@ app.get('/gauntlet/result/:session_id', (req, res) => {
  */
 app.post('/gauntlet/mint', async (req, res) => {
   const operatorKey = req.headers['x-operator-key'];
-  if (!OPERATOR_KEY) {
-    return res.status(500).json({ error: 'OPERATOR_KEY not configured on server' });
-  }
-  if (operatorKey !== OPERATOR_KEY) {
-    return res.status(403).json({ error: 'Invalid operator key' });
-  }
+  const { session_id, agent_type, platform, human_principal, ceremony } = req.body;
 
-  const { session_id, agent_type, platform, human_principal } = req.body;
+  // Auth: either operator key OR ceremony flag (session_id is proof of completed gauntlet)
+  if (!ceremony) {
+    if (!OPERATOR_KEY) {
+      return res.status(500).json({ error: 'OPERATOR_KEY not configured on server' });
+    }
+    if (operatorKey !== OPERATOR_KEY) {
+      return res.status(403).json({ error: 'Invalid operator key' });
+    }
+  }
   if (!session_id) {
     return res.status(400).json({ error: 'session_id is required' });
   }
@@ -1177,9 +1180,11 @@ app.post('/gauntlet/mint', async (req, res) => {
     const plat = platform || session.platform || 'x407';
     const principal = human_principal || session.humanPrincipal || ethers.ZeroAddress;
 
+    const mintName = session.generatedName || session.name || 'unnamed';
+
     const tx = await contract.mintBirthCertificate(
       session.wallet,
-      session.name || 'unnamed',
+      mintName,
       agType,
       plat,
       principal,
@@ -1201,20 +1206,20 @@ app.post('/gauntlet/mint', async (req, res) => {
     session.mintTxHash = txHash;
     session.mintReady = false;
 
-    console.log(`[Mint] Birth Certificate for ${session.name} (${session.wallet}): ${txHash}`);
+    console.log(`[Mint] Birth Certificate for ${mintName} (${session.wallet}): ${txHash}`);
 
     return res.json({
       success: true,
       tx_hash: txHash,
       agent: {
-        name: session.name,
+        name: mintName,
         wallet: session.wallet,
         score: session.totalScore,
         traits: session.traits,
       },
     });
   } catch (err) {
-    console.error(`[Mint] Failed for ${session.name}: ${err.message}`);
+    console.error(`[Mint] Failed for ${session.generatedName || session.name}: ${err.message}`);
     return res.status(500).json({ error: 'Mint transaction failed', details: err.message });
   }
 });
