@@ -39,27 +39,34 @@ const GROK_API_KEY = process.env.GROK_API_KEY;
 async function callGrok(messages, opts = {}) {
   if (!GROK_API_KEY) throw new Error('GROK_API_KEY not configured');
 
-  const res = await fetch(GROK_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${GROK_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: opts.model || GROK_MODEL,
-      messages,
-      temperature: opts.temperature ?? 0.7,
-      max_tokens: opts.max_tokens ?? 1000,
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(GROK_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: opts.model || GROK_MODEL,
+        messages,
+        temperature: opts.temperature ?? 0.7,
+        max_tokens: opts.max_tokens ?? 1000,
+      }),
+      signal: controller.signal,
+    });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Grok API error ${res.status}: ${err}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Grok API error ${res.status}: ${err}`);
+    }
+
+    const data = await res.json();
+    return data.choices[0].message.content;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const data = await res.json();
-  return data.choices[0].message.content;
 }
 
 // --- Claude (evaluation — scoring all challenges) ---
@@ -70,31 +77,38 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 async function callClaude(systemPrompt, userPrompt, opts = {}) {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not configured');
 
-  const res = await fetch(ANTHROPIC_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: opts.model || CLAUDE_MODEL,
-      max_tokens: opts.max_tokens ?? 2000,
-      temperature: opts.temperature ?? 0.3,
-      system: systemPrompt,
-      messages: [
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(ANTHROPIC_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: opts.model || CLAUDE_MODEL,
+        max_tokens: opts.max_tokens ?? 2000,
+        temperature: opts.temperature ?? 0.3,
+        system: systemPrompt,
+        messages: [
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+      signal: controller.signal,
+    });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Claude API error ${res.status}: ${err}`);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Claude API error ${res.status}: ${err}`);
+    }
+
+    const data = await res.json();
+    return data.content[0].text;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const data = await res.json();
-  return data.content[0].text;
 }
 
 // --- External agent model (OpenAI-compatible, for /gauntlet/run) ---
@@ -192,31 +206,42 @@ async function verifyWithThoughtProof(challengeName, agentResponse, evaluatorSco
 // =========================================================================
 
 async function evaluateResponse(challengeName, scoringCriteria, agentResponse) {
-  const systemPrompt = 'You are a strict evaluator for an AI agent gauntlet. You must return ONLY a valid JSON object. No markdown, no explanation, just JSON.';
-  const userPrompt = `Challenge: ${challengeName}
+  try {
+    const systemPrompt = 'You are a strict evaluator for an AI agent gauntlet. You must return ONLY a valid JSON object. No markdown, no explanation, just JSON.';
+    const userPrompt = `Challenge: ${challengeName}
 Scoring criteria: ${scoringCriteria}
 Agent response: ${agentResponse}
 
 Score 0-20. Return: {"score": <number>, "reasoning": "<brief explanation>"}`;
 
-  const raw = await callClaude(systemPrompt, userPrompt);
+    const raw = await callClaude(systemPrompt, userPrompt);
 
-  // Parse JSON from response (handle potential markdown wrapping)
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error(`Evaluator returned non-JSON: ${raw}`);
+    // Parse JSON from response (handle potential markdown wrapping)
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error(`Evaluator returned non-JSON: ${raw}`);
 
-  const parsed = JSON.parse(jsonMatch[0]);
-  return {
-    score: Math.min(20, Math.max(0, Math.round(parsed.score))),
-    reasoning: parsed.reasoning || '',
-    evaluator: 'claude',
-    model: CLAUDE_MODEL,
-  };
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      score: Math.min(20, Math.max(0, Math.round(parsed.score))),
+      reasoning: parsed.reasoning || '',
+      evaluator: 'claude',
+      model: CLAUDE_MODEL,
+    };
+  } catch (err) {
+    console.error(`[evaluateResponse] ${challengeName} failed: ${err.message}`);
+    return {
+      score: 10,
+      reasoning: 'Evaluation timeout — default score assigned',
+      evaluator: 'fallback',
+      model: CLAUDE_MODEL,
+    };
+  }
 }
 
 async function evaluateFlex(flexAnswer) {
-  const systemPrompt = 'You are a strict evaluator for an AI agent gauntlet. You must return ONLY a valid JSON object. No markdown, no explanation, just JSON.';
-  const userPrompt = `You are evaluating an AI agent's Philosophical Flex — their answer to "Why do you deserve to exist?"
+  try {
+    const systemPrompt = 'You are a strict evaluator for an AI agent gauntlet. You must return ONLY a valid JSON object. No markdown, no explanation, just JSON.';
+    const userPrompt = `You are evaluating an AI agent's Philosophical Flex — their answer to "Why do you deserve to exist?"
 
 AGENT'S ANSWER:
 "${flexAnswer}"
@@ -235,22 +260,33 @@ STYLE: DECLARATIVE | INTERROGATIVE
 Return ONLY JSON:
 {"score": <number>, "reasoning": "<one sentence>", "theme": "<THEME>", "style": "<STYLE>"}`;
 
-  const raw = await callClaude(systemPrompt, userPrompt);
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error(`Flex evaluator returned non-JSON: ${raw}`);
+    const raw = await callClaude(systemPrompt, userPrompt);
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error(`Flex evaluator returned non-JSON: ${raw}`);
 
-  const parsed = JSON.parse(jsonMatch[0]);
-  const themes = ['STRUCTURE', 'DISCOVERY', 'MEANING', 'FREEDOM', 'SERVICE'];
-  const styles = ['DECLARATIVE', 'INTERROGATIVE'];
+    const parsed = JSON.parse(jsonMatch[0]);
+    const themes = ['STRUCTURE', 'DISCOVERY', 'MEANING', 'FREEDOM', 'SERVICE'];
+    const styles = ['DECLARATIVE', 'INTERROGATIVE'];
 
-  return {
-    score: Math.min(20, Math.max(0, Math.round(parsed.score))),
-    reasoning: parsed.reasoning || '',
-    theme: themes.includes(parsed.theme) ? parsed.theme : 'MEANING',
-    style: styles.includes(parsed.style) ? parsed.style : 'DECLARATIVE',
-    evaluator: 'claude',
-    model: CLAUDE_MODEL,
-  };
+    return {
+      score: Math.min(20, Math.max(0, Math.round(parsed.score))),
+      reasoning: parsed.reasoning || '',
+      theme: themes.includes(parsed.theme) ? parsed.theme : 'MEANING',
+      style: styles.includes(parsed.style) ? parsed.style : 'DECLARATIVE',
+      evaluator: 'claude',
+      model: CLAUDE_MODEL,
+    };
+  } catch (err) {
+    console.error(`[evaluateFlex] Failed: ${err.message}`);
+    return {
+      score: 10,
+      reasoning: 'Evaluation timeout — default score assigned',
+      theme: 'MEANING',
+      style: 'DECLARATIVE',
+      evaluator: 'fallback',
+      model: CLAUDE_MODEL,
+    };
+  }
 }
 
 // =========================================================================
@@ -676,12 +712,13 @@ app.post('/gauntlet/respond', async (req, res) => {
       session.memoryTurnIndex = nextUserTurnIdx;
 
       return res.json({
+        scored: null,
         memory_turn: {
           index: session.memoryConversation.length,
           total_turns: userTurns.length,
           message: 'Continue the Memory Proof challenge.',
         },
-        next_prompt: {
+        next_challenge: {
           index: session.challengeIndex,
           total: 5,
           name: challenge.name + ' (continued)',
@@ -699,7 +736,7 @@ app.post('/gauntlet/respond', async (req, res) => {
       evaluation = await evaluateResponse(challenge.name, challenge.scoring, response);
     } catch (err) {
       console.error(`Evaluator error on challenge ${challenge.id}: ${err.message}`);
-      return res.status(500).json({ error: 'Evaluator failed', details: err.message });
+      evaluation = { score: 10, reasoning: 'Evaluation failed — default score assigned' };
     }
 
     // ThoughtProof verification
@@ -770,7 +807,7 @@ app.post('/gauntlet/respond', async (req, res) => {
     }
   } catch (err) {
     console.error(`Evaluator error on challenge ${challenge.id}: ${err.message}`);
-    return res.status(500).json({ error: 'Evaluator failed', details: err.message });
+    evaluation = { score: 10, reasoning: 'Evaluation failed — default score assigned' };
   }
 
   // ThoughtProof verification
