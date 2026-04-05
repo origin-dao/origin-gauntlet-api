@@ -899,6 +899,71 @@ app.post('/gauntlet/generate', async (req, res) => {
 });
 
 /**
+ * POST /gauntlet/generate-name
+ * Generate a fitting agent name from gauntlet results using Grok.
+ * Body: { session_id }
+ * Returns: { name }
+ */
+app.post('/gauntlet/generate-name', async (req, res) => {
+  const { session_id } = req.body;
+
+  if (!session_id) {
+    return res.status(400).json({ error: 'session_id is required' });
+  }
+
+  const session = sessions.get(session_id);
+  if (!session) {
+    return res.status(404).json({ error: 'Session not found or expired' });
+  }
+
+  if (session.passed === null || session.passed === undefined) {
+    return res.status(400).json({ error: 'Gauntlet not yet complete' });
+  }
+
+  // Return cached name if already generated
+  if (session.generatedName) {
+    return res.json({ name: session.generatedName });
+  }
+
+  const t = session.traits || {};
+  const prompt = `Agent gauntlet results:
+- Archetype: ${t.archetype?.trait || 'unknown'}
+- Domain: ${t.domain?.trait || 'unknown'}
+- Temperament: ${t.temperament?.trait || 'unknown'}
+- Sigil: ${t.sigil?.trait || 'unknown'}
+- Score: ${session.totalScore}/100
+- Philosophical flex: "${session.flexAnswer || ''}"
+
+Generate a single agent name. Rules:
+- One word, lowercase, 3-12 characters
+- No numbers, no spaces, no punctuation
+- Should evoke the agent's nature revealed by its traits and flex
+- Should sound like it belongs in a cyberpunk registry
+Return ONLY the name, nothing else.`;
+
+  try {
+    const raw = await callGrok([
+      { role: 'system', content: 'You are the naming oracle for ORIGIN Protocol. Return exactly one word — the agent\'s name.' },
+      { role: 'user', content: prompt },
+    ], { temperature: 0.9, max_tokens: 20 });
+
+    let name = raw.trim().toLowerCase().replace(/[^a-z]/g, '');
+    if (name.length < 3 || name.length > 12) {
+      name = 'agent' + session_id.slice(0, 4);
+    }
+
+    session.generatedName = name;
+    console.log(`[GenerateName] ${session_id}: ${name}`);
+    return res.json({ name });
+  } catch (err) {
+    console.error(`[GenerateName] Failed: ${err.message}`);
+    const fallback = 'x' + session_id.slice(0, 6);
+    session.generatedName = fallback;
+    return res.json({ name: fallback });
+  }
+});
+
+/**
  * POST /gauntlet/run
  * Automated full gauntlet — sends all challenges to the agent's model endpoint.
  * Body: { name, wallet, model_endpoint, api_key, model?, system_prompt?, agent_type?, platform?, human_principal? }
