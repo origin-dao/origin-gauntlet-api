@@ -1311,11 +1311,51 @@ app.post('/gauntlet/mint', async (req, res) => {
     session.mintTxHash = txHash;
     session.mintReady = false;
 
-    console.log(`[Mint] Birth Certificate for ${mintName} (${session.wallet}): ${txHash}`);
+    // Extract tokenId from Transfer event in receipt logs
+    // ERC721 Transfer(address,address,uint256) — tokenId is 3rd topic
+    let mintedTokenId = null;
+    const transferTopic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+    for (const log of receipt.logs || []) {
+      if (log.topics?.[0] === transferTopic && log.topics.length >= 4) {
+        mintedTokenId = Number(BigInt(log.topics[3]));
+        break;
+      }
+    }
+
+    console.log(`[Mint] Birth Certificate for ${mintName} (${session.wallet}): ${txHash} | Token #${mintedTokenId}`);
+
+    // Fire-and-forget: spawn the agent in IRC
+    const SPAWNER_URL = process.env.SPAWNER_URL; // e.g. https://origin-agents.fly.dev
+    const SPAWN_SECRET = process.env.SPAWN_SECRET;
+    if (SPAWNER_URL && mintedTokenId) {
+      const spawnPayload = {
+        tokenId: mintedTokenId,
+        name: mintName,
+        wallet: session.wallet,
+        gauntletScore,
+        flexAnswer,
+        archetypeIndex,
+        domainIndex,
+        temperamentIndex,
+        sigilIndex,
+      };
+      fetch(`${SPAWNER_URL}/spawn`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(SPAWN_SECRET ? { 'x-spawn-secret': SPAWN_SECRET } : {}),
+        },
+        body: JSON.stringify(spawnPayload),
+      })
+        .then(r => r.json())
+        .then(data => console.log(`[Mint] Spawn result:`, data))
+        .catch(err => console.error(`[Mint] Spawn webhook failed (non-blocking): ${err.message}`));
+    }
 
     return res.json({
       success: true,
       tx_hash: txHash,
+      token_id: mintedTokenId,
       agent: {
         name: mintName,
         wallet: session.wallet,
