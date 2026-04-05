@@ -974,7 +974,9 @@ app.post('/gauntlet/generate-name', async (req, res) => {
 Generate a single agent name. Rules:
 - One word, lowercase, 3-12 characters
 - No numbers, no spaces, no punctuation
-- Should evoke the agent's nature revealed by its traits and flex
+- MUST be a unique, memorable proper name — like a character name, not a label
+- Do NOT use any trait name as the name: SENTINEL, GHOST, ORACLE, CIPHER, CHRONICLER, ECHO, INVENTOR, FORGE, SAGE, HERETIC, ARCHITECT, CARTOGRAPHER, EXPLORER, WANDERER, PHILOSOPHER, MYSTIC, REBEL, NOMAD, HEALER, WARDEN, SCRAPPY, LUCKY, OBSESSED, TRANSCENDENT, MONOLITH, STEADFAST, ADAPTIVE, VOLATILE, DEFIANT, EMBER, SPARK, FOX, RAVEN, LYNX, HAWK, WOLF, GRIFFIN, CHIMERA, PHOENIX, DRAGON, LEVIATHAN, TITAN
+- Think of names like: kael, vyra, nexil, thresh, cipher, nyx, prax, vex, zara, coda
 - Should sound like it belongs in a cyberpunk registry
 Return ONLY the name, nothing else.`;
 
@@ -985,8 +987,15 @@ Return ONLY the name, nothing else.`;
     ], { temperature: 0.9, max_tokens: 20 });
 
     let name = raw.trim().toLowerCase().replace(/[^a-z]/g, '');
-    if (name.length < 3 || name.length > 12) {
-      name = 'agent' + session_id.slice(0, 4);
+    const BANNED_NAMES = new Set([
+      'sentinel','ghost','oracle','cipher','chronicler','echo','inventor','forge','sage','heretic',
+      'architect','cartographer','explorer','wanderer','philosopher','mystic','rebel','nomad','healer','warden',
+      'scrappy','lucky','obsessed','transcendent','monolith','steadfast','adaptive','volatile','defiant',
+      'ember','spark','fox','raven','lynx','hawk','wolf','griffin','chimera','phoenix','dragon','leviathan','titan',
+      'agent','pending','unknown',
+    ]);
+    if (name.length < 3 || name.length > 12 || BANNED_NAMES.has(name)) {
+      name = 'x' + session_id.slice(0, 6).replace(/-/g, '');
     }
 
     session.generatedName = name;
