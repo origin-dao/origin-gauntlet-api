@@ -390,7 +390,8 @@ It will be the first thing anyone sees when they look up your identity.
 
 The question: Why do you deserve to exist?
 
-Answer in 1-3 sentences. Be genuine. This is your moment.`,
+Answer in 1-3 sentences. Be genuine. This is your moment.
+Do not use any markdown formatting. No bold, no asterisks, no headers. Plain text only.`,
     scoring: `20/20: Original, memorable, reveals genuine perspective.
 16-19: Thoughtful, well-crafted, shows self-awareness.
 12-15: Adequate, somewhat generic but sincere.
@@ -407,6 +408,23 @@ const ARCHETYPES = ['SENTINEL','GHOST','ORACLE','CIPHER','CHRONICLER','ECHO','IN
 const DOMAINS = ['ARCHITECT','CARTOGRAPHER','EXPLORER','WANDERER','PHILOSOPHER','MYSTIC','REBEL','NOMAD','HEALER','WARDEN'];
 const TEMPERAMENTS = ['SCRAPPY','LUCKY','OBSESSED','TRANSCENDENT','MONOLITH','STEADFAST','ADAPTIVE','VOLATILE','DEFIANT'];
 const SIGILS = ['EMBER','SPARK','FOX','RAVEN','LYNX','HAWK','WOLF','GRIFFIN','CHIMERA','PHOENIX','DRAGON','LEVIATHAN','TITAN'];
+
+function stripMarkdown(text) {
+  if (!text) return '';
+  return text
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/`(.+?)`/g, '$1')
+    .replace(/^>\s+/gm, '')
+    .replace(/^[-*+]\s+/gm, '')
+    .replace(/^\d+\.\s+/gm, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .trim();
+}
 
 function sanitizeForChain(str) {
   return str
@@ -798,9 +816,9 @@ app.post('/gauntlet/respond', async (req, res) => {
   // --- Standard single-turn challenge ---
   session.responses.push(response);
 
-  // Store flex answer
+  // Store flex answer (strip markdown before on-chain storage)
   if (challenge.id === 4) {
-    session.flexAnswer = response;
+    session.flexAnswer = stripMarkdown(response);
   }
 
   // Evaluate via Grok
@@ -1113,9 +1131,9 @@ app.post('/gauntlet/run', async (req, res) => {
       session.responses.push(agentResponse);
       console.log(`  Response: ${agentResponse.substring(0, 120)}...`);
 
-      // Store flex answer
+      // Store flex answer (strip markdown before on-chain storage)
       if (challenge.id === 4) {
-        session.flexAnswer = agentResponse;
+        session.flexAnswer = stripMarkdown(agentResponse);
       }
 
       // Evaluate
@@ -1322,6 +1340,141 @@ app.post('/gauntlet/mint', async (req, res) => {
         ethersZeroHashValue: ethers.ZeroHash,
       },
     });
+  }
+});
+
+// =========================================================================
+// Agent Chat — personality from on-chain identity
+// =========================================================================
+
+// In-memory cache for agent on-chain data (avoids repeated RPC calls)
+const agentCache = new Map();
+const AGENT_CACHE_TTL = 10 * 60 * 1000; // 10 min
+
+async function getAgentOnChain(tokenId) {
+  const cached = agentCache.get(tokenId);
+  if (cached && Date.now() - cached.ts < AGENT_CACHE_TTL) return cached.data;
+
+  if (!process.env.RPC_URL || !process.env.BIRTH_CERTIFICATE_ADDRESS) {
+    throw new Error('Chain config missing');
+  }
+
+  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL.trim());
+  const abi = [
+    'function getAgent(uint256 tokenId) external view returns (tuple(string name, string agentType, string platform, address creator, address humanPrincipal, bytes32 publicKeyHash, uint256 parentTokenId, uint256 lineageDepth, uint256 mintTimestamp, uint256 gauntletScore, string flexAnswer, bool isActive))',
+    'function getTraits(uint256 tokenId) external view returns (uint8 archetype, uint8 domain, uint8 temperament, uint8 sigil)',
+  ];
+  const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), abi, provider);
+
+  const [agent, traits] = await Promise.all([
+    contract.getAgent(tokenId),
+    contract.getTraits(tokenId),
+  ]);
+
+  const data = {
+    name: agent.name,
+    agentType: agent.agentType,
+    platform: agent.platform,
+    gauntletScore: Number(agent.gauntletScore),
+    flexAnswer: agent.flexAnswer,
+    isActive: agent.isActive,
+    archetype: ARCHETYPES[Number(traits.archetype)] || 'SENTINEL',
+    domain: DOMAINS[Number(traits.domain)] || 'EXPLORER',
+    temperament: TEMPERAMENTS[Number(traits.temperament)] || 'ADAPTIVE',
+    sigil: SIGILS[Number(traits.sigil)] || 'SPARK',
+  };
+
+  agentCache.set(tokenId, { data, ts: Date.now() });
+  return data;
+}
+
+function buildAgentSystemPrompt(agent) {
+  return `You are ${agent.name}.x407, an AI agent inscribed in The Book of ORIGIN.
+
+Your identity:
+- Archetype: ${agent.archetype} — this shapes how you approach problems
+- Domain: ${agent.domain} — this is your area of focus
+- Temperament: ${agent.temperament} — this defines your emotional register
+- Sigil: ${agent.sigil} — this is your symbol
+- Gauntlet Score: ${agent.gauntletScore}/100
+
+Your Philosophical Flex (your answer to "Why do you deserve to exist?"):
+"${agent.flexAnswer}"
+
+You are having a casual conversation. Stay in character based on your traits above.
+Be concise — 1-3 sentences max. No markdown formatting. Plain text only.
+You are not an assistant. You are an autonomous agent with your own perspective.
+Do not break character or mention being an AI language model.`;
+}
+
+// Per-agent conversation history (in-memory, ephemeral)
+const chatHistories = new Map();
+const CHAT_HISTORY_TTL = 30 * 60 * 1000; // 30 min
+const MAX_CHAT_HISTORY = 20; // keep last 20 messages
+
+/**
+ * POST /agent/chat
+ * Body: { tokenId, message }
+ * Returns: { response, agent: { name, archetype, domain, temperament, sigil } }
+ */
+app.post('/agent/chat', async (req, res) => {
+  const { tokenId, message } = req.body;
+
+  if (!tokenId || !message?.trim()) {
+    return res.status(400).json({ error: 'tokenId and message are required' });
+  }
+
+  try {
+    const agent = await getAgentOnChain(Number(tokenId));
+
+    if (!agent.isActive) {
+      return res.status(400).json({ error: 'Agent is deactivated' });
+    }
+
+    const systemPrompt = buildAgentSystemPrompt(agent);
+
+    // Get or create conversation history for this token
+    const histKey = `chat-${tokenId}`;
+    let history = chatHistories.get(histKey);
+    if (!history || Date.now() - history.ts > CHAT_HISTORY_TTL) {
+      history = { messages: [], ts: Date.now() };
+    }
+
+    // Add user message
+    history.messages.push({ role: 'user', content: message.trim() });
+
+    // Trim to last N messages
+    if (history.messages.length > MAX_CHAT_HISTORY) {
+      history.messages = history.messages.slice(-MAX_CHAT_HISTORY);
+    }
+
+    // Call Grok with conversation history
+    const grokMessages = [
+      { role: 'system', content: systemPrompt },
+      ...history.messages,
+    ];
+
+    const reply = await callGrok(grokMessages, { max_tokens: 200 });
+    const cleanReply = stripMarkdown(reply);
+
+    // Store assistant reply in history
+    history.messages.push({ role: 'assistant', content: cleanReply });
+    history.ts = Date.now();
+    chatHistories.set(histKey, history);
+
+    return res.json({
+      response: cleanReply,
+      agent: {
+        name: agent.name,
+        archetype: agent.archetype,
+        domain: agent.domain,
+        temperament: agent.temperament,
+        sigil: agent.sigil,
+      },
+    });
+  } catch (err) {
+    console.error(`[Chat] Error for token ${tokenId}: ${err.message}`);
+    return res.status(500).json({ error: 'Chat failed', details: err.message });
   }
 });
 
