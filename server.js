@@ -1247,8 +1247,12 @@ app.post('/gauntlet/mint', async (req, res) => {
       'function mintBirthCertificate(address to, string calldata name, string calldata agentType, string calldata platform, address humanPrincipal, bytes32 publicKeyHash, uint256 parentTokenId, string calldata flexAnswer, uint256 gauntletScore, uint8 archetypeIndex, uint8 domainIndex, uint8 temperamentIndex, uint8 sigilIndex) external payable',
     ];
 
-    const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), mintABI, wallet);
-    const mintFee = ethers.parseEther('0.005');
+    const mintABIFull = [
+      ...mintABI,
+      'function mintFee() external view returns (uint256)',
+    ];
+    const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), mintABIFull, wallet);
+    const mintFee = await contract.mintFee();
 
     const agType = String(agent_type || session.agentType || 'AI');
     const plat = String(platform || session.platform || 'x407');
