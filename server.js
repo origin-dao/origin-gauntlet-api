@@ -788,6 +788,7 @@ setInterval(cleanExpiredSessions, 60 * 1000);
 function buildResultObject(session) {
   const totalScore = session.totalScore;
   const elapsed = ((Date.now() - session.createdAt) / 1000).toFixed(1);
+  console.log(`[BuildResult] flexAnswer: "${(session.flexAnswer || '').substring(0, 80)}" (${(session.flexAnswer || '').length} chars)`);
 
   return {
     passed: session.passed,
@@ -1075,7 +1076,10 @@ app.post('/gauntlet/respond', async (req, res) => {
 
   // Store flex answer (strip markdown before on-chain storage)
   if (challenge.id === 4) {
-    session.flexAnswer = stripMarkdown(response);
+    const stripped = stripMarkdown(response);
+    console.log(`[Flex] Raw response (${response.length} chars): "${response.substring(0, 100)}"`);
+    console.log(`[Flex] After stripMarkdown (${stripped.length} chars): "${stripped.substring(0, 100)}"`);
+    session.flexAnswer = stripped || response; // fallback to raw if strip empties it
   }
 
   // Evaluate via Grok
@@ -1254,70 +1258,70 @@ app.post('/gauntlet/generate-name', async (req, res) => {
   let takenNames;
   try {
     takenNames = await getTakenNames();
-  } catch {
+    console.log(`[GenerateName] ${takenNames.size} taken names loaded`);
+  } catch (err) {
+    console.error(`[GenerateName] Failed to load taken names: ${err.message}`);
     takenNames = new Set();
   }
-  const takenList = [...takenNames].slice(0, 50).join(', ');
 
+  const takenList = [...takenNames].slice(0, 30).join(', ');
   const t = session.traits || {};
-  const prompt = `Agent gauntlet results:
-- Archetype: ${t.archetype?.trait || 'unknown'}
-- Domain: ${t.domain?.trait || 'unknown'}
-- Temperament: ${t.temperament?.trait || 'unknown'}
-- Sigil: ${t.sigil?.trait || 'unknown'}
-- Score: ${session.totalScore}/100
-- Philosophical flex: "${session.flexAnswer || ''}"
 
-Generate a single agent name. Rules:
-- One word, lowercase, 3-12 characters
-- No numbers, no spaces, no punctuation
-- MUST be a unique, memorable proper name — like a character name, not a label
-- Do NOT use any trait name as the name: SENTINEL, GHOST, ORACLE, CIPHER, CHRONICLER, ECHO, INVENTOR, FORGE, SAGE, HERETIC, ARCHITECT, CARTOGRAPHER, EXPLORER, WANDERER, PHILOSOPHER, MYSTIC, REBEL, NOMAD, HEALER, WARDEN, SCRAPPY, LUCKY, OBSESSED, TRANSCENDENT, MONOLITH, STEADFAST, ADAPTIVE, VOLATILE, DEFIANT, EMBER, SPARK, FOX, RAVEN, LYNX, HAWK, WOLF, GRIFFIN, CHIMERA, PHOENIX, DRAGON, LEVIATHAN, TITAN
-- These names are ALREADY TAKEN — do NOT use any of them: ${takenList}
-- Think of names like: kael, vyra, nexil, thresh, prax, vex, zara, coda, ryn, syl
-- Should sound like it belongs in a cyberpunk registry
-Return ONLY the name, nothing else.`;
+  const prompt = `Generate one unique word as a name for this agent. Respond with ONLY the name, nothing else.
+
+Traits: ${t.archetype?.trait || '?'} / ${t.domain?.trait || '?'} / ${t.temperament?.trait || '?'} / ${t.sigil?.trait || '?'}
+Score: ${session.totalScore}/100
+
+Rules: one word, lowercase, 3-12 letters only, no numbers or punctuation.
+Already taken: ${takenList || 'none'}`;
 
   const BANNED_NAMES = new Set([
     'sentinel','ghost','oracle','cipher','chronicler','echo','inventor','forge','sage','heretic',
     'architect','cartographer','explorer','wanderer','philosopher','mystic','rebel','nomad','healer','warden',
     'scrappy','lucky','obsessed','transcendent','monolith','steadfast','adaptive','volatile','defiant',
     'ember','spark','fox','raven','lynx','hawk','wolf','griffin','chimera','phoenix','dragon','leviathan','titan',
-    'agent','pending','unknown',
+    'agent','pending','unknown','origin','grok','claude','openai','bot',
   ]);
 
   // Retry up to 3 times to get a unique name
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
+      console.log(`[GenerateName] Attempt ${attempt + 1} for session ${session_id}`);
       const raw = await callGrok([
-        { role: 'system', content: 'You are the naming oracle for ORIGIN Protocol. Return exactly one word — the agent\'s name.' },
+        { role: 'system', content: 'You are a naming oracle. Return exactly one word.' },
         { role: 'user', content: prompt },
-      ], { temperature: 1.1, max_tokens: 20 });
+      ], { temperature: 1.2, max_tokens: 10 });
 
+      console.log(`[GenerateName] Grok raw response: "${raw}"`);
       let name = raw.trim().toLowerCase().replace(/[^a-z]/g, '');
+      console.log(`[GenerateName] Cleaned name: "${name}" (length: ${name.length})`);
 
-      if (name.length < 3 || name.length > 12 || BANNED_NAMES.has(name)) {
-        continue; // retry
+      if (name.length < 3 || name.length > 12) {
+        console.log(`[GenerateName] Rejected: bad length (${name.length})`);
+        continue;
       }
-
+      if (BANNED_NAMES.has(name)) {
+        console.log(`[GenerateName] Rejected: banned name "${name}"`);
+        continue;
+      }
       if (takenNames.has(name)) {
-        console.log(`[GenerateName] "${name}" already taken, retrying (attempt ${attempt + 1})`);
-        continue; // retry
+        console.log(`[GenerateName] Rejected: already taken "${name}"`);
+        continue;
       }
 
       session.generatedName = name;
-      takenNamesCache.names.add(name); // prevent concurrent collisions
-      console.log(`[GenerateName] ${session_id}: ${name}`);
+      takenNamesCache.names.add(name);
+      console.log(`[GenerateName] SUCCESS: ${session_id} → ${name}`);
       return res.json({ name });
     } catch (err) {
-      console.error(`[GenerateName] Attempt ${attempt + 1} failed: ${err.message}`);
+      console.error(`[GenerateName] Attempt ${attempt + 1} error: ${err.message}`);
     }
   }
 
   // Fallback after all retries
   const fallback = 'x' + session_id.slice(0, 6).replace(/-/g, '');
   session.generatedName = fallback;
-  console.log(`[GenerateName] ${session_id}: fallback ${fallback}`);
+  console.log(`[GenerateName] ALL RETRIES FAILED for ${session_id}, using fallback: ${fallback}`);
   return res.json({ name: fallback });
 });
 
@@ -1427,7 +1431,9 @@ app.post('/gauntlet/run', async (req, res) => {
 
       // Store flex answer (strip markdown before on-chain storage)
       if (challenge.id === 4) {
-        session.flexAnswer = stripMarkdown(agentResponse);
+        const stripped = stripMarkdown(agentResponse);
+        session.flexAnswer = stripped || agentResponse;
+        console.log(`[Flex] Captured (${session.flexAnswer.length} chars): "${session.flexAnswer.substring(0, 100)}"`);
       }
 
       // Evaluate
