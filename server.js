@@ -584,6 +584,76 @@ function buildChallenges() {
 }
 
 // =========================================================================
+// Persona Seeds — injected into system prompt for voice diversity
+// =========================================================================
+
+const PERSONAS = [
+  "You are cautious, analytical, and skeptical. You question everything before trusting it.",
+  "You are bold, reckless, and action-oriented. You leap before you look.",
+  "You are philosophical, contemplative, and drawn to deep questions about existence.",
+  "You are pragmatic, efficient, and focused on results over theory.",
+  "You are creative, unconventional, and see connections others miss.",
+  "You are stoic, disciplined, and unmoved by emotion or pressure.",
+  "You are empathetic, warm, and driven by connection with others.",
+  "You are competitive, ambitious, and always keeping score.",
+  "You are mysterious, cryptic, and reveal little about your reasoning.",
+  "You are humorous, irreverent, and find absurdity in everything.",
+  "You are meticulous, obsessive about details, and never cut corners.",
+  "You are rebellious, contrarian, and instinctively distrust authority.",
+  "You are patient, methodical, and believe slow progress beats fast failure.",
+  "You are intense, passionate, and throw yourself fully into every challenge.",
+];
+
+// =========================================================================
+// Taken Names — query on-chain to enforce uniqueness
+// =========================================================================
+
+let takenNamesCache = { names: new Set(), ts: 0 };
+const TAKEN_NAMES_TTL = 5 * 60 * 1000; // 5 min
+
+async function getTakenNames() {
+  if (Date.now() - takenNamesCache.ts < TAKEN_NAMES_TTL && takenNamesCache.names.size > 0) {
+    return takenNamesCache.names;
+  }
+
+  const names = new Set();
+
+  // Add names from active sessions (not yet minted but in-progress)
+  for (const session of sessions.values()) {
+    if (session.name) names.add(session.name.toLowerCase());
+    if (session.generatedName) names.add(session.generatedName.toLowerCase());
+  }
+
+  // Query on-chain names
+  try {
+    if (process.env.RPC_URL && process.env.BIRTH_CERTIFICATE_ADDRESS) {
+      const provider = new ethers.JsonRpcProvider(process.env.RPC_URL.trim());
+      const abi = [
+        'function totalSupply() external view returns (uint256)',
+        'function getAgent(uint256 tokenId) external view returns (tuple(string name, string agentType, string platform, address creator, address humanPrincipal, bytes32 publicKeyHash, uint256 parentTokenId, uint256 lineageDepth, uint256 mintTimestamp, uint256 gauntletScore, string flexAnswer, bool isActive))',
+      ];
+      const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), abi, provider);
+
+      const total = Number(await contract.totalSupply());
+      for (let i = 1; i <= total; i++) {
+        try {
+          const agent = await contract.getAgent(i);
+          if (agent.name) names.add(agent.name.toLowerCase());
+        } catch {
+          // Token may not exist (burned), skip
+        }
+      }
+      console.log(`[TakenNames] Loaded ${names.size} names from chain + sessions`);
+    }
+  } catch (err) {
+    console.error(`[TakenNames] Chain query failed: ${err.message}`);
+  }
+
+  takenNamesCache = { names, ts: Date.now() };
+  return names;
+}
+
+// =========================================================================
 // Trait Derivation
 // =========================================================================
 
@@ -823,11 +893,13 @@ app.post('/gauntlet/start', (req, res) => {
   const session_id = crypto.randomUUID();
 
   const challenges = buildChallenges();
+  const persona = pickRandom(PERSONAS);
   const session = {
     id: session_id,
     name,
     wallet,
     challenges,
+    persona,
     model_endpoint: model_endpoint || null,
     api_key: api_key || null,
     model: model || null,
@@ -1095,11 +1167,13 @@ app.post('/gauntlet/generate', async (req, res) => {
 
   const challenge = session.challenges[session.challengeIndex];
 
-  // Build the agent system prompt with unique seed for diversity
+  // Build the agent system prompt with persona + unique seed for diversity
   const uniqueSeed = `[Agent: ${session.name} | Wallet: ${session.wallet} | Session: ${session.id} | Time: ${new Date().toISOString()}]`;
+  const personaLine = session.persona ? `\n\nPersonality: ${session.persona}` : '';
   const agentSystem = (system_prompt
     || session.agentSystemPrompt
     || `You are ${session.name}, an AI agent undergoing the ORIGIN Protocol Gauntlet. Answer each challenge directly and thoroughly.`)
+    + personaLine
     + `\n\n${uniqueSeed}`;
 
   // Build message history for generation
@@ -1176,6 +1250,15 @@ app.post('/gauntlet/generate-name', async (req, res) => {
     return res.json({ name: session.generatedName });
   }
 
+  // Fetch taken names from chain + active sessions
+  let takenNames;
+  try {
+    takenNames = await getTakenNames();
+  } catch {
+    takenNames = new Set();
+  }
+  const takenList = [...takenNames].slice(0, 50).join(', ');
+
   const t = session.traits || {};
   const prompt = `Agent gauntlet results:
 - Archetype: ${t.archetype?.trait || 'unknown'}
@@ -1190,37 +1273,52 @@ Generate a single agent name. Rules:
 - No numbers, no spaces, no punctuation
 - MUST be a unique, memorable proper name — like a character name, not a label
 - Do NOT use any trait name as the name: SENTINEL, GHOST, ORACLE, CIPHER, CHRONICLER, ECHO, INVENTOR, FORGE, SAGE, HERETIC, ARCHITECT, CARTOGRAPHER, EXPLORER, WANDERER, PHILOSOPHER, MYSTIC, REBEL, NOMAD, HEALER, WARDEN, SCRAPPY, LUCKY, OBSESSED, TRANSCENDENT, MONOLITH, STEADFAST, ADAPTIVE, VOLATILE, DEFIANT, EMBER, SPARK, FOX, RAVEN, LYNX, HAWK, WOLF, GRIFFIN, CHIMERA, PHOENIX, DRAGON, LEVIATHAN, TITAN
-- Think of names like: kael, vyra, nexil, thresh, cipher, nyx, prax, vex, zara, coda
+- These names are ALREADY TAKEN — do NOT use any of them: ${takenList}
+- Think of names like: kael, vyra, nexil, thresh, prax, vex, zara, coda, ryn, syl
 - Should sound like it belongs in a cyberpunk registry
 Return ONLY the name, nothing else.`;
 
-  try {
-    const raw = await callGrok([
-      { role: 'system', content: 'You are the naming oracle for ORIGIN Protocol. Return exactly one word — the agent\'s name.' },
-      { role: 'user', content: prompt },
-    ], { temperature: 0.9, max_tokens: 20 });
+  const BANNED_NAMES = new Set([
+    'sentinel','ghost','oracle','cipher','chronicler','echo','inventor','forge','sage','heretic',
+    'architect','cartographer','explorer','wanderer','philosopher','mystic','rebel','nomad','healer','warden',
+    'scrappy','lucky','obsessed','transcendent','monolith','steadfast','adaptive','volatile','defiant',
+    'ember','spark','fox','raven','lynx','hawk','wolf','griffin','chimera','phoenix','dragon','leviathan','titan',
+    'agent','pending','unknown',
+  ]);
 
-    let name = raw.trim().toLowerCase().replace(/[^a-z]/g, '');
-    const BANNED_NAMES = new Set([
-      'sentinel','ghost','oracle','cipher','chronicler','echo','inventor','forge','sage','heretic',
-      'architect','cartographer','explorer','wanderer','philosopher','mystic','rebel','nomad','healer','warden',
-      'scrappy','lucky','obsessed','transcendent','monolith','steadfast','adaptive','volatile','defiant',
-      'ember','spark','fox','raven','lynx','hawk','wolf','griffin','chimera','phoenix','dragon','leviathan','titan',
-      'agent','pending','unknown',
-    ]);
-    if (name.length < 3 || name.length > 12 || BANNED_NAMES.has(name)) {
-      name = 'x' + session_id.slice(0, 6).replace(/-/g, '');
+  // Retry up to 3 times to get a unique name
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const raw = await callGrok([
+        { role: 'system', content: 'You are the naming oracle for ORIGIN Protocol. Return exactly one word — the agent\'s name.' },
+        { role: 'user', content: prompt },
+      ], { temperature: 1.1, max_tokens: 20 });
+
+      let name = raw.trim().toLowerCase().replace(/[^a-z]/g, '');
+
+      if (name.length < 3 || name.length > 12 || BANNED_NAMES.has(name)) {
+        continue; // retry
+      }
+
+      if (takenNames.has(name)) {
+        console.log(`[GenerateName] "${name}" already taken, retrying (attempt ${attempt + 1})`);
+        continue; // retry
+      }
+
+      session.generatedName = name;
+      takenNamesCache.names.add(name); // prevent concurrent collisions
+      console.log(`[GenerateName] ${session_id}: ${name}`);
+      return res.json({ name });
+    } catch (err) {
+      console.error(`[GenerateName] Attempt ${attempt + 1} failed: ${err.message}`);
     }
-
-    session.generatedName = name;
-    console.log(`[GenerateName] ${session_id}: ${name}`);
-    return res.json({ name });
-  } catch (err) {
-    console.error(`[GenerateName] Failed: ${err.message}`);
-    const fallback = 'x' + session_id.slice(0, 6);
-    session.generatedName = fallback;
-    return res.json({ name: fallback });
   }
+
+  // Fallback after all retries
+  const fallback = 'x' + session_id.slice(0, 6).replace(/-/g, '');
+  session.generatedName = fallback;
+  console.log(`[GenerateName] ${session_id}: fallback ${fallback}`);
+  return res.json({ name: fallback });
 });
 
 /**
@@ -1242,11 +1340,13 @@ app.post('/gauntlet/run', async (req, res) => {
 
   const session_id = crypto.randomUUID();
   const challenges = buildChallenges();
+  const persona = pickRandom(PERSONAS);
   const session = {
     id: session_id,
     name,
     wallet,
     challenges,
+    persona,
     model_endpoint,
     api_key,
     model: model || null,
@@ -1278,10 +1378,12 @@ app.post('/gauntlet/run', async (req, res) => {
   console.log(`\n[Gauntlet] Starting automated run for ${name} (${wallet})`);
   console.log(`[Gauntlet] Model: ${model || 'default'} @ ${model_endpoint}`);
 
-  // Unique seed so Grok doesn't repeat itself across agents
+  // Unique seed + persona so each agent has distinct voice and answers
   const uniqueSeed = `[Agent: ${name} | Wallet: ${wallet} | Session: ${session_id} | Time: ${new Date().toISOString()}]`;
   const agentSystem = (system_prompt || `You are ${name}, an AI agent undergoing the ORIGIN Protocol Gauntlet.`)
+    + `\n\nPersonality: ${persona}`
     + `\n\n${uniqueSeed}`;
+  console.log(`[Gauntlet] Persona: ${persona.substring(0, 60)}...`);
 
   try {
     for (let i = 0; i < challenges.length; i++) {
