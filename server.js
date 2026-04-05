@@ -1293,7 +1293,25 @@ app.post('/gauntlet/mint', async (req, res) => {
     });
   } catch (err) {
     console.error(`[Mint] Failed for ${session.generatedName || session.name}: ${err.message}`);
-    return res.status(500).json({ error: 'Mint transaction failed', details: err.message });
+    return res.status(500).json({
+      error: 'Mint transaction failed',
+      details: err.message,
+      debug: {
+        to: session.wallet,
+        name: String(session.generatedName || session.name || 'unnamed'),
+        gauntletScore: session.totalScore,
+        gauntletScoreType: typeof session.totalScore,
+        archetypeIndex: session.traits?.archetype?.index,
+        archetypeIndexType: typeof session.traits?.archetype?.index,
+        domainIndex: session.traits?.domain?.index,
+        temperamentIndex: session.traits?.temperament?.index,
+        sigilIndex: session.traits?.sigil?.index,
+        flexAnswerLength: (session.flexAnswer || '').length,
+        hasTraits: !!session.traits,
+        ethersZeroHash: typeof ethers.ZeroHash,
+        ethersZeroHashValue: ethers.ZeroHash,
+      },
+    });
   }
 });
 
