@@ -84,7 +84,7 @@ npm start
 
 ## Deployment
 
-Deployed on Railway: `origin-gauntlet-api-production.up.railway.app`
+Deployed on Railway: `origin-gauntlet-api-production-7e37.up.railway.app`
 
 ## Trait Derivation
 

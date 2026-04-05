@@ -1212,14 +1212,15 @@ app.post('/gauntlet/mint', async (req, res) => {
   }
 
   try {
-    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL.trim());
+    const privateKey = process.env.PRIVATE_KEY.trim().replace(/^["']|["']$/g, '');
+    const wallet = new ethers.Wallet(privateKey, provider);
 
     const mintABI = [
       'function mintBirthCertificate(address to, string calldata name, string calldata agentType, string calldata platform, address humanPrincipal, bytes32 publicKeyHash, uint256 parentTokenId, string calldata flexAnswer, uint256 gauntletScore, uint8 archetypeIndex, uint8 domainIndex, uint8 temperamentIndex, uint8 sigilIndex) external payable',
     ];
 
-    const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS, mintABI, wallet);
+    const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), mintABI, wallet);
     const mintFee = ethers.parseEther('0.005');
 
     const agType = String(agent_type || session.agentType || 'AI');
