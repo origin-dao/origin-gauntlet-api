@@ -1222,26 +1222,53 @@ app.post('/gauntlet/mint', async (req, res) => {
     const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS, mintABI, wallet);
     const mintFee = ethers.parseEther('0.005');
 
-    const agType = agent_type || session.agentType || 'AI';
-    const plat = platform || session.platform || 'x407';
-    const principal = human_principal || session.humanPrincipal || ethers.ZeroAddress;
+    const agType = String(agent_type || session.agentType || 'AI');
+    const plat = String(platform || session.platform || 'x407');
+    const rawPrincipal = human_principal || session.humanPrincipal || ethers.ZeroAddress;
+    const principal = ethers.isAddress(rawPrincipal) ? rawPrincipal : ethers.ZeroAddress;
 
-    const mintName = session.generatedName || session.name || 'unnamed';
+    const mintName = String(session.generatedName || session.name || 'unnamed');
+    const flexAnswer = String(session.flexAnswer || '');
+    const gauntletScore = Number.isFinite(session.totalScore) ? Math.round(session.totalScore) : 0;
+    const archetypeIndex = Math.min(255, Math.max(0, Number(session.traits?.archetype?.index) || 0));
+    const domainIndex = Math.min(255, Math.max(0, Number(session.traits?.domain?.index) || 0));
+    const temperamentIndex = Math.min(255, Math.max(0, Number(session.traits?.temperament?.index) || 0));
+    const sigilIndex = Math.min(255, Math.max(0, Number(session.traits?.sigil?.index) || 0));
+
+    console.log(`[Mint] Parameters:`, {
+      to: session.wallet,
+      name: mintName,
+      agentType: agType,
+      platform: plat,
+      humanPrincipal: principal,
+      publicKeyHash: ethers.ZeroHash,
+      parentTokenId: 0,
+      flexAnswer: flexAnswer.slice(0, 50) + (flexAnswer.length > 50 ? '...' : ''),
+      gauntletScore,
+      archetypeIndex,
+      domainIndex,
+      temperamentIndex,
+      sigilIndex,
+      mintFee: mintFee.toString(),
+    });
+
+    // Validate wallet address
+    const toAddress = ethers.getAddress(session.wallet); // checksums + validates
 
     const tx = await contract.mintBirthCertificate(
-      session.wallet,
+      toAddress,
       mintName,
       agType,
       plat,
       principal,
-      ethers.ZeroHash,
-      0,
-      session.flexAnswer || '',
-      session.totalScore,
-      session.traits?.archetype?.index ?? 0,
-      session.traits?.domain?.index ?? 0,
-      session.traits?.temperament?.index ?? 0,
-      session.traits?.sigil?.index ?? 0,
+      ethers.ZeroHash,       // bytes32 publicKeyHash
+      0,                      // uint256 parentTokenId
+      flexAnswer,
+      gauntletScore,
+      archetypeIndex,
+      domainIndex,
+      temperamentIndex,
+      sigilIndex,
       { value: mintFee },
     );
 
