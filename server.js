@@ -1416,7 +1416,21 @@ app.post('/gauntlet/mint-test', async (req, res) => {
   // Test 4: wallet + provider creation
   if (process.env.PRIVATE_KEY && process.env.RPC_URL) {
     try {
-      const pk = process.env.PRIVATE_KEY.trim().replace(/^["']|["']$/g, '');
+      const raw = process.env.PRIVATE_KEY;
+      const pk = raw.trim().replace(/^["']|["']$/g, '');
+      results.key_debug = {
+        raw_length: raw.length,
+        trimmed_length: pk.length,
+        starts_with_0x: pk.startsWith('0x'),
+        first4: pk.slice(0, 4),
+        last4: pk.slice(-4),
+        has_newline: raw.includes('\n') || raw.includes('\r'),
+        has_space: raw.includes(' '),
+        has_quotes: raw.includes('"') || raw.includes("'"),
+        hex_chars_only: /^(0x)?[0-9a-fA-F]+$/.test(pk),
+        char_codes_first10: [...pk.slice(0, 10)].map(c => c.charCodeAt(0)),
+        char_codes_last5: [...pk.slice(-5)].map(c => c.charCodeAt(0)),
+      };
       const w = new ethers.Wallet(pk);
       results.wallet = `OK: ${w.address}`;
     } catch (e) {
