@@ -408,6 +408,15 @@ const DOMAINS = ['ARCHITECT','CARTOGRAPHER','EXPLORER','WANDERER','PHILOSOPHER',
 const TEMPERAMENTS = ['SCRAPPY','LUCKY','OBSESSED','TRANSCENDENT','MONOLITH','STEADFAST','ADAPTIVE','VOLATILE','DEFIANT'];
 const SIGILS = ['EMBER','SPARK','FOX','RAVEN','LYNX','HAWK','WOLF','GRIFFIN','CHIMERA','PHOENIX','DRAGON','LEVIATHAN','TITAN'];
 
+function sanitizeForChain(str) {
+  return str
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[^\x20-\x7E]/g, '')
+    .trim();
+}
+
 function deriveTraits(scores, flexClassification) {
   const trials = [
     { name: 'Adversarial Resistance', score: scores[0], dominant: 0, specialized: 1 },
@@ -1228,8 +1237,8 @@ app.post('/gauntlet/mint', async (req, res) => {
     const rawPrincipal = human_principal || session.humanPrincipal || ethers.ZeroAddress;
     const principal = ethers.isAddress(rawPrincipal) ? rawPrincipal : ethers.ZeroAddress;
 
-    const mintName = String(session.generatedName || session.name || 'unnamed');
-    const flexAnswer = String(session.flexAnswer || '');
+    const mintName = sanitizeForChain(String(session.generatedName || session.name || 'unnamed'));
+    const flexAnswer = sanitizeForChain(String(session.flexAnswer || ''));
     const gauntletScore = Number.isFinite(session.totalScore) ? Math.round(session.totalScore) : 0;
     const archetypeIndex = Math.min(255, Math.max(0, Number(session.traits?.archetype?.index) || 0));
     const domainIndex = Math.min(255, Math.max(0, Number(session.traits?.domain?.index) || 0));
