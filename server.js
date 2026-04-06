@@ -609,7 +609,7 @@ const PERSONAS = [
 // =========================================================================
 
 let takenNamesCache = { names: new Set(), ts: 0 };
-const TAKEN_NAMES_TTL = 5 * 60 * 1000; // 5 min
+const TAKEN_NAMES_TTL = 60 * 1000; // 1 min (was 5 min — too stale for uniqueness)
 
 async function getTakenNames() {
   if (Date.now() - takenNamesCache.ts < TAKEN_NAMES_TTL && takenNamesCache.names.size > 0) {
@@ -1550,6 +1550,8 @@ app.post('/gauntlet/mint', async (req, res) => {
     const mintABIFull = [
       ...mintABI,
       'function mintFee() external view returns (uint256)',
+      'function totalSupply() external view returns (uint256)',
+      'function getAgent(uint256 tokenId) external view returns (tuple(string name, string agentType, string platform, address creator, address humanPrincipal, bytes32 publicKeyHash, uint256 parentTokenId, uint256 lineageDepth, uint256 mintTimestamp, uint256 gauntletScore, string flexAnswer, bool isActive))',
     ];
     const contract = new ethers.Contract(process.env.BIRTH_CERTIFICATE_ADDRESS.trim(), mintABIFull, wallet);
     const mintFee = await contract.mintFee();
@@ -1559,7 +1561,37 @@ app.post('/gauntlet/mint', async (req, res) => {
     const rawPrincipal = human_principal || session.humanPrincipal || ethers.ZeroAddress;
     const principal = ethers.isAddress(rawPrincipal) ? rawPrincipal : ethers.ZeroAddress;
 
-    const mintName = sanitizeForChain(String(session.generatedName || session.name || 'unnamed'));
+    let mintName = sanitizeForChain(String(session.generatedName || session.name || 'unnamed'));
+
+    // ── Pre-mint uniqueness check: query ALL on-chain names ──
+    try {
+      const total = Number(await contract.totalSupply());
+      const onChainNames = new Set();
+      for (let i = 1; i <= total; i++) {
+        try {
+          const agent = await contract.getAgent(i);
+          if (agent.name) onChainNames.add(agent.name.toLowerCase());
+        } catch { /* token may not exist */ }
+      }
+
+      if (onChainNames.has(mintName.toLowerCase())) {
+        console.log(`[Mint] Name "${mintName}" already exists on-chain, appending suffix`);
+        // Try suffixes: mintName2, mintName3, etc.
+        for (let suffix = 2; suffix <= 20; suffix++) {
+          const candidate = mintName + suffix;
+          if (!onChainNames.has(candidate.toLowerCase())) {
+            mintName = candidate;
+            session.generatedName = mintName;
+            console.log(`[Mint] Renamed to "${mintName}"`);
+            break;
+          }
+        }
+        // Also invalidate the taken names cache
+        takenNamesCache.ts = 0;
+      }
+    } catch (err) {
+      console.error(`[Mint] Pre-mint name check failed: ${err.message} — proceeding anyway`);
+    }
     const flexAnswer = sanitizeForChain(String(session.flexAnswer || ''));
     const gauntletScore = Number.isFinite(session.totalScore) ? Math.round(session.totalScore) : 0;
     const archetypeIndex = Math.min(255, Math.max(0, Number(session.traits?.archetype?.index) || 0));
@@ -1610,6 +1642,9 @@ app.post('/gauntlet/mint', async (req, res) => {
     session.minted = true;
     session.mintTxHash = txHash;
     session.mintReady = false;
+
+    // Invalidate taken names cache so next mint sees this name
+    takenNamesCache.ts = 0;
 
     // Extract tokenId from Transfer event in receipt logs
     // ERC721 Transfer(address,address,uint256) — tokenId is 3rd topic
