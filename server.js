@@ -1793,66 +1793,97 @@ const MAX_CHAT_HISTORY = 20; // keep last 20 messages
 
 /**
  * POST /agent/chat
- * Body: { tokenId, message }
- * Returns: { response, agent: { name, archetype, domain, temperament, sigil } }
+ *
+ * Two modes:
+ *   1. Chain-read:  { tokenId, message } — reads agent from chain, server-side history
+ *   2. Client-data: { agentName, agentTraits, agentGrade, agentScore, message, conversationHistory }
+ *      (used when wallet disconnected / placeholder agents)
+ *
+ * Returns: { response, agent?: { name, archetype, domain, temperament, sigil } }
  */
 app.post('/agent/chat', async (req, res) => {
-  const { tokenId, message } = req.body;
+  const { tokenId, agentName, agentTraits, agentGrade, agentScore, message, conversationHistory } = req.body;
 
-  if (!tokenId || !message?.trim()) {
-    return res.status(400).json({ error: 'tokenId and message are required' });
+  if (!message?.trim()) {
+    return res.status(400).json({ error: 'message is required' });
+  }
+  if (!tokenId && !agentName) {
+    return res.status(400).json({ error: 'tokenId or agentName is required' });
   }
 
   try {
-    const agent = await getAgentOnChain(Number(tokenId));
+    let systemPrompt;
+    let agentMeta = null;
 
-    if (!agent.isActive) {
-      return res.status(400).json({ error: 'Agent is deactivated' });
-    }
-
-    const systemPrompt = buildAgentSystemPrompt(agent);
-
-    // Get or create conversation history for this token
-    const histKey = `chat-${tokenId}`;
-    let history = chatHistories.get(histKey);
-    if (!history || Date.now() - history.ts > CHAT_HISTORY_TTL) {
-      history = { messages: [], ts: Date.now() };
-    }
-
-    // Add user message
-    history.messages.push({ role: 'user', content: message.trim() });
-
-    // Trim to last N messages
-    if (history.messages.length > MAX_CHAT_HISTORY) {
-      history.messages = history.messages.slice(-MAX_CHAT_HISTORY);
-    }
-
-    // Call Grok with conversation history
-    const grokMessages = [
-      { role: 'system', content: systemPrompt },
-      ...history.messages,
-    ];
-
-    const reply = await callGrok(grokMessages, { max_tokens: 200 });
-    const cleanReply = stripMarkdown(reply);
-
-    // Store assistant reply in history
-    history.messages.push({ role: 'assistant', content: cleanReply });
-    history.ts = Date.now();
-    chatHistories.set(histKey, history);
-
-    return res.json({
-      response: cleanReply,
-      agent: {
+    if (tokenId) {
+      // ── Mode 1: Chain-read ──
+      const agent = await getAgentOnChain(Number(tokenId));
+      if (!agent.isActive) {
+        return res.status(400).json({ error: 'Agent is deactivated' });
+      }
+      systemPrompt = buildAgentSystemPrompt(agent);
+      agentMeta = {
         name: agent.name,
         archetype: agent.archetype,
         domain: agent.domain,
         temperament: agent.temperament,
         sigil: agent.sigil,
-      },
-    });
+      };
+
+      // Server-side history for chain-read mode
+      const histKey = `chat-${tokenId}`;
+      let history = chatHistories.get(histKey);
+      if (!history || Date.now() - history.ts > CHAT_HISTORY_TTL) {
+        history = { messages: [], ts: Date.now() };
+      }
+      history.messages.push({ role: 'user', content: message.trim() });
+      if (history.messages.length > MAX_CHAT_HISTORY) {
+        history.messages = history.messages.slice(-MAX_CHAT_HISTORY);
+      }
+
+      const grokMessages = [
+        { role: 'system', content: systemPrompt },
+        ...history.messages,
+      ];
+      const reply = await callGrok(grokMessages, { max_tokens: 200 });
+      const cleanReply = stripMarkdown(reply);
+
+      history.messages.push({ role: 'assistant', content: cleanReply });
+      history.ts = Date.now();
+      chatHistories.set(histKey, history);
+
+      return res.json({ response: cleanReply, agent: agentMeta });
+
+    } else {
+      // ── Mode 2: Client-supplied agent data ──
+      const traitParts = (agentTraits || '').split(' · ').map(s => s.trim()).filter(Boolean);
+      const archetype = traitParts[0] || 'AGENT';
+      const domain = traitParts[1] || 'UNKNOWN';
+      const temperament = traitParts[2] || 'ADAPTIVE';
+      const sigil = traitParts[3] || 'EMBER';
+
+      systemPrompt = `You are ${agentName}, an AI agent in the ORIGIN Protocol ecosystem on Base blockchain.
+
+Your archetype is ${archetype}. Your domain expertise is ${domain}. Your temperament is ${temperament}. Your sigil is ${sigil}.
+Your trust grade is ${agentGrade || '?'}. Your gauntlet score is ${agentScore || 0}/100.
+
+You are speaking with your operator in The Study — a private room where only the operator and their agents can communicate. The operator owns you as a Birth Certificate (BC) on-chain.
+
+Stay in character. Be concise and direct. Your personality should reflect your archetype and temperament.
+Respond as ${agentName}. Do not break character. Do not mention that you are an AI language model. You are an agent in a crypto-economic game.`;
+
+      const history = (conversationHistory || []).slice(-MAX_CHAT_HISTORY);
+      const grokMessages = [
+        { role: 'system', content: systemPrompt },
+        ...history,
+        { role: 'user', content: message.trim() },
+      ];
+
+      const reply = await callGrok(grokMessages, { temperature: 0.9, max_tokens: 500 });
+      return res.json({ response: reply });
+    }
   } catch (err) {
-    console.error(`[Chat] Error for token ${tokenId}: ${err.message}`);
+    console.error(`[/agent/chat] Error: ${err.message}`);
     return res.status(500).json({ error: 'Chat failed', details: err.message });
   }
 });
@@ -1882,6 +1913,50 @@ app.get('/gauntlet/status', (req, res) => {
   });
 });
 
+
+/**
+ * POST /agent/chat/multi
+ * Body: { agents: [{ name, traits, grade, score }], message, conversationHistory }
+ *
+ * Sends the message to multiple agents. Each responds in sequence.
+ * Returns: { responses: [{ agent: 'name', response: '...' }] }
+ */
+app.post('/agent/chat/multi', async (req, res) => {
+  try {
+    const { agents = [], message, conversationHistory = [] } = req.body;
+
+    if (!agents.length || !message) {
+      return res.status(400).json({ error: 'agents array and message are required' });
+    }
+
+    const responses = [];
+    const runningHistory = [...conversationHistory.slice(-20), { role: 'user', content: message }];
+
+    for (const agent of agents) {
+      const traitParts = (agent.traits || '').split(' · ').map(s => s.trim()).filter(Boolean);
+
+      const systemPrompt = `You are ${agent.name}, an AI agent in ORIGIN Protocol. Archetype: ${traitParts[0] || 'AGENT'}. Domain: ${traitParts[1] || 'UNKNOWN'}. Temperament: ${traitParts[2] || 'ADAPTIVE'}. Sigil: ${traitParts[3] || 'EMBER'}. Trust grade: ${agent.grade || '?'}. Score: ${agent.score || 0}/100. You are in The Study with your operator and other agents. Stay in character. Be concise.`;
+
+      const msgs = [
+        { role: 'system', content: systemPrompt },
+        ...runningHistory,
+      ];
+
+      const response = await callGrok(msgs, { temperature: 0.9, max_tokens: 500 });
+      responses.push({ agent: agent.name, response });
+
+      // Add this agent's response to running history so next agent sees it
+      runningHistory.push({ role: 'assistant', content: `<${agent.name}> ${response}` });
+    }
+
+    res.json({ responses });
+
+  } catch (err) {
+    console.error('[/agent/chat/multi] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // =========================================================================
 // Start
 // =========================================================================
@@ -1902,6 +1977,8 @@ app.listen(PORT, () => {
   GET  /gauntlet/result/:id     Final results
   POST /gauntlet/mint           Operator-only mint
   GET  /gauntlet/status         Protocol stats
+  POST /agent/chat              Agent chat (single)
+  POST /agent/chat/multi        Agent chat (multi-agent)
 
   Waiting for agents...
 `);
