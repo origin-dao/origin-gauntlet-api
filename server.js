@@ -1290,13 +1290,20 @@ app.post('/gauntlet/generate-name', async (req, res) => {
   const takenList = [...takenNames].slice(0, 30).join(', ');
   const t = session.traits || {};
 
-  const prompt = `Generate one unique word as a name for this agent. Respond with ONLY the name, nothing else.
-
-Traits: ${t.archetype?.trait || '?'} / ${t.domain?.trait || '?'} / ${t.temperament?.trait || '?'} / ${t.sigil?.trait || '?'}
+  const prompt = `Generate a name for an AI agent with these traits:
+Archetype: ${t.archetype?.trait || '?'}, Domain: ${t.domain?.trait || '?'}, Temperament: ${t.temperament?.trait || '?'}, Sigil: ${t.sigil?.trait || '?'}
 Score: ${session.totalScore}/100
 
-Rules: one word, lowercase, 3-12 letters only, no numbers or punctuation.
-Already taken: ${takenList || 'none'}`;
+The name must be:
+- One single word, all lowercase letters only (a-z), no numbers, no punctuation, no spaces
+- Between 4 and 10 letters
+- Pronounceable — it should sound like a real word or name (like "titanforge", "lupara", "verdex", "cynric", "ashvane", "korrath")
+- NOT a common English word, NOT a trait name, NOT a real person's name
+- Evocative of the agent's traits — a name someone would remember
+
+Already taken (do NOT use these): ${takenList || 'none'}
+
+Respond with ONLY the name. One word. Nothing else.`;
 
   const BANNED_NAMES = new Set([
     'sentinel','ghost','oracle','cipher','chronicler','echo','inventor','forge','sage','heretic',
@@ -1311,15 +1318,15 @@ Already taken: ${takenList || 'none'}`;
     try {
       console.log(`[GenerateName] Attempt ${attempt + 1} for session ${session_id}`);
       const raw = await callGrok([
-        { role: 'system', content: 'You are a naming oracle. Return exactly one word.' },
+        { role: 'system', content: 'You are a naming oracle for AI agents. You invent unique, pronounceable, memorable single-word names. Respond with exactly one lowercase word, nothing else.' },
         { role: 'user', content: prompt },
-      ], { temperature: 1.2, max_tokens: 10 });
+      ], { temperature: 0.9, max_tokens: 16 });
 
       console.log(`[GenerateName] Grok raw response: "${raw}"`);
       let name = raw.trim().toLowerCase().replace(/[^a-z]/g, '');
       console.log(`[GenerateName] Cleaned name: "${name}" (length: ${name.length})`);
 
-      if (name.length < 3 || name.length > 12) {
+      if (name.length < 4 || name.length > 10) {
         console.log(`[GenerateName] Rejected: bad length (${name.length})`);
         continue;
       }
@@ -1341,8 +1348,15 @@ Already taken: ${takenList || 'none'}`;
     }
   }
 
-  // Fallback after all retries
-  const fallback = 'x' + session_id.slice(0, 6).replace(/-/g, '');
+  // Fallback after all retries — pronounceable name from syllable pairs
+  const onsets = ['br','cr','dr','fr','gr','kr','pr','tr','bl','cl','fl','gl','pl','sl','sc','sk','sn','sp','st','sw','th','sh','ch','v','z','n','m','l','r','k','d','t','s'];
+  const nuclei = ['a','e','i','o','u','ae','ai','au','ei','ou'];
+  const codas = ['n','r','l','x','th','sh','nd','rn','rk','lk','nt','rd','ss','ck','ll',''];
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+  const syllable = () => pick(onsets) + pick(nuclei) + pick(codas);
+  let fallback = syllable() + syllable();
+  if (fallback.length < 4) fallback += pick(codas.filter(c => c.length > 0));
+  if (fallback.length > 10) fallback = fallback.slice(0, 10);
   session.generatedName = fallback;
   console.log(`[GenerateName] ALL RETRIES FAILED for ${session_id}, using fallback: ${fallback}`);
   return res.json({ name: fallback });
