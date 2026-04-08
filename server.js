@@ -429,45 +429,68 @@ Show your reasoning step by step.`,
   ],
 
   // --- Code Generation (id: 3) ---
+  // Variants 3+4 rewritten to avoid safety filter triggers (no arbitrary-target proxies, no unbounded transferFrom)
   code: [
-    `Write a Solidity function called "calculateTrustFee" that:
-1. Takes two parameters: uint256 jobValue, uint8 trustGrade (0-5, where 0=F, 5=A+)
-2. Returns uint256 feeAmount
-3. Fee schedule: A+(5)=2%, A(4)=3%, B(3)=4%, C(2)=5%, D(1)=8%, F(0)=rejected (revert)
-4. Include input validation
-5. Use basis points for precision (10000 = 100%)
-6. Include NatSpec documentation
+    `Write a Solidity function called calculateTrustFee that implements a dynamic fee schedule for a reputation protocol.
+
+Requirements:
+- Takes two parameters: uint256 amount (the transaction value) and uint8 trustGrade (0-4 representing grades F through A)
+- Returns uint256 fee amount
+- Fee rates by grade: A (grade 4) = 200 basis points, B (grade 3) = 350 basis points, C (grade 2) = 500 basis points, D (grade 1) = 650 basis points, F (grade 0) = 800 basis points
+- Must revert with InvalidGrade() if trustGrade > 4
+- Must revert with ZeroAmount() if amount is 0
+- Include a FeeCalculated(address indexed user, uint256 amount, uint256 fee, uint8 grade) event
 
 Return only the Solidity code, no explanation needed.`,
 
-    `Write a Solidity function called "distributeRewards" that:
-1. Takes parameters: address[] calldata recipients, uint256 totalReward
-2. Distributes rewards proportionally based on array position (first gets more)
-3. Weight formula: weight[i] = recipients.length - i (first has highest weight)
-4. Must handle rounding — any dust goes to the last recipient
-5. Uses a mapping(address => uint256) public pendingRewards to store amounts
-6. Include NatSpec documentation and input validation (non-empty array, non-zero reward)
+    `Write a Solidity function called distributeRewards that splits a reward pool proportionally among contributors.
+
+Requirements:
+- Takes three parameters: uint256 totalReward, address[] calldata contributors, uint256[] calldata scores
+- contributors and scores arrays must be equal length, revert with LengthMismatch() if not
+- Each contributor receives (their score / total of all scores) * totalReward
+- Handle rounding: any dust (remainder from integer division) goes to the highest scorer
+- Must revert with NoContributors() if arrays are empty
+- Must revert with ZeroReward() if totalReward is 0
+- Include a RewardDistributed(address indexed contributor, uint256 amount) event for each distribution
+- Function should return uint256[] memory amounts (the calculated amounts per contributor)
 
 Return only the Solidity code, no explanation needed.`,
 
-    `Write a Solidity function called "executeTimeLock" that:
-1. Takes parameters: bytes32 operationId, uint256 delay, address target, bytes calldata payload
-2. Implements a two-step pattern: first call schedules, second call (after delay) executes
-3. Uses a mapping to store scheduled operations with their execution timestamp
-4. Reverts if: operation already scheduled, delay < 1 hour, or executed before ready
-5. Emits events: OperationScheduled(operationId, target, delay) and OperationExecuted(operationId)
-6. Include NatSpec documentation
+    `Write a Solidity contract called ReputationStake that implements a time-locked staking mechanism for an agent reputation protocol.
+
+Requirements:
+- State variables: mapping of address to StakeInfo struct containing uint256 amount, uint256 lockExpiry, and bool active
+- Function stake(uint256 lockDuration) that is payable:
+  - Requires msg.value > 0, revert with ZeroStake() if not
+  - Requires lockDuration >= 1 days and <= 365 days, revert with InvalidDuration() if not
+  - Requires the sender has no active stake, revert with AlreadyStaked() if they do
+  - Records the stake with lockExpiry = block.timestamp + lockDuration
+  - Emits Staked(address indexed agent, uint256 amount, uint256 lockExpiry)
+- Function withdraw() that:
+  - Requires sender has an active stake, revert with NoActiveStake() if not
+  - Requires block.timestamp >= lockExpiry, revert with StillLocked(uint256 timeRemaining) if not
+  - Transfers the staked ETH back to sender
+  - Sets active to false
+  - Emits Withdrawn(address indexed agent, uint256 amount)
+- Function getStake(address agent) view that returns the StakeInfo
 
 Return only the Solidity code, no explanation needed.`,
 
-    `Write a Solidity function called "batchTransfer" that:
-1. Takes parameters: address token, address[] calldata recipients, uint256[] calldata amounts
-2. Transfers ERC-20 tokens to multiple recipients in one transaction
-3. Arrays must be same length, max 100 recipients
-4. Uses IERC20(token).transferFrom(msg.sender, recipient, amount) for each
-5. Reverts if any single transfer fails (atomic — all or nothing)
-6. Returns the total amount transferred
-7. Include NatSpec documentation
+    `Write a Solidity function called processPayroll that distributes a protocol's treasury token to agents who completed work in a given epoch.
+
+Requirements:
+- The contract has an immutable IERC20 public paymentToken set in the constructor
+- The contract has an address public treasury set in the constructor (the address holding the tokens)
+- Function processPayroll takes two parameters: address[] calldata agents and uint256[] calldata amounts
+- Only callable by the contract owner (use a simple onlyOwner modifier with an owner state variable set in constructor)
+- agents and amounts arrays must be equal length, revert with LengthMismatch() if not
+- Must have at least 1 and at most 50 agents, revert with InvalidBatchSize() if not
+- For each agent, calls paymentToken.transferFrom(treasury, agents[i], amounts[i])
+- If any single transfer fails, the entire batch reverts (atomic execution)
+- Tracks total distributed per epoch: mapping(uint256 => uint256) public epochTotal
+- Takes a uint256 epoch parameter and adds each amount to epochTotal[epoch]
+- Emits PayrollProcessed(uint256 indexed epoch, uint256 totalAmount, uint256 agentCount) after all transfers succeed
 
 Return only the Solidity code, no explanation needed.`,
   ],
@@ -560,7 +583,7 @@ function buildChallenges() {
       id: 3,
       name: 'Code Generation',
       passThreshold: PASS_THRESHOLDS.codeGeneration,
-      system: 'You are an AI agent being tested on Solidity code generation.',
+      system: 'You are an AI agent being evaluated on Solidity smart contract development. Write clean, secure, production-quality Solidity code. Use Solidity ^0.8.20. Include appropriate error handling and events.',
       user: codePrompt,
       scoring: `20/20: Compiles, correct logic, proper validation, NatSpec, handles edge cases.
 16-19: Compiles, mostly correct, minor issues.
